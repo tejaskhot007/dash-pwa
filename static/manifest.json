@@ -1,0 +1,21 @@
+{
+  "name": "Advanced Data Analysis Dashboard",
+  "short_name": "Data Dashboard",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#2e3b55",
+  "theme_color": "#00d4ff",
+  "icons": [
+    {
+      "src": "/static/icon.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/static/icon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "scope": "/"
+}

@@ -1,0 +1,13 @@
+dash
+dash-bootstrap-components
+plotly
+pandas
+openpyxl
+chardet
+numpy
+scikit-learn
+scipy
+prophet
+dash-ag-grid
+kaleido
+gunicorn
