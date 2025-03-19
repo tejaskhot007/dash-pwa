@@ -16,8 +16,6 @@ import plotly.figure_factory as ff
 import dash_ag_grid as dag
 from datetime import datetime
 import logging
-from scipy.stats import ttest_ind
-from prophet import Prophet
 import zipfile
 
 # Configure logging
@@ -50,10 +48,12 @@ data_store = DataStore()
 # Data cleaning function
 def clean_data(df):
     try:
+        logger.info(f"Original columns: {df.columns.tolist()}")
         df.columns = (df.columns.str.strip()
                      .str.replace(" ", "_", regex=False)
                      .str.replace(r"[^\w\s]", "", regex=True)
                      .str.lower())
+        logger.info(f"Cleaned columns: {df.columns.tolist()}")
         for col in df.columns:
             if df[col].dtype == 'object':
                 try:
@@ -71,9 +71,11 @@ def clean_data(df):
 # File parsing function
 def parse_contents(contents, filename):
     try:
+        logger.info(f"Parsing file: {filename}")
         content_type, content_string = contents.split(',')
         decoded = base64.b64decode(content_string)
         encoding = chardet.detect(decoded)['encoding'] or 'utf-8'
+        logger.info(f"Detected encoding: {encoding}")
         if filename.endswith('.csv'):
             df = pd.read_csv(io.StringIO(decoded.decode(encoding)), low_memory=False, engine='c')
         elif filename.endswith('.xlsx'):
@@ -84,285 +86,381 @@ def parse_contents(contents, filename):
         if df is not None:
             data_store.df = df
             data_store.last_updated = datetime.now()
+            logger.info(f"File parsed successfully: {df.shape}")
+        else:
+            logger.error("Data cleaning returned None")
         return df
     except Exception as e:
         logger.error(f"File parsing error: {e}")
         return None
 
-# Data transformation function
-def transform_data(df, col, transform_type):
-    try:
-        if transform_type == 'log':
-            return np.log1p(df[col].replace([np.inf, -np.inf], np.nan))
-        elif transform_type == 'normalize':
-            return (df[col] - df[col].min()) / (df[col].max() - df[col].min())
-        elif transform_type == 'none' or transform_type is None:
-            return df[col]
-        return df[col]
-    except Exception as e:
-        logger.error(f"Data transformation error: {e}")
-        return df[col]
-
-# Outlier detection
-def detect_outliers(df, col):
-    Q1, Q3 = df[col].quantile([0.25, 0.75])
-    IQR = Q3 - Q1
-    lower, upper = Q1 - 1.5 * IQR, Q3 + 1.5 * IQR
-    return df[col].apply(lambda x: 'outlier' if x < lower or x > upper else 'normal')
-
 # Chart generation functions
-def generate_main_chart(df, selected_column, selected_y_axis, chart_type, dark_mode, selected_category, show_outliers, cluster_count, transform_type):
-    if not selected_column or not selected_y_axis:
-        return px.scatter(title="Please select X and Y axes")
+def generate_main_chart(df, selected_column, selected_y_axis, chart_type, dark_mode, selected_category):
     try:
-        df_copy = df.copy()
-        x_data = transform_data(df_copy, selected_column, transform_type)
-        y_data = transform_data(df_copy, selected_y_axis, transform_type)
-
-        if show_outliers:
-            df_copy['outlier'] = detect_outliers(df_copy, selected_column)
-            color = 'outlier'
+        if not selected_column or not selected_y_axis:
+            return px.scatter(title="Please select X and Y axes")
+        
+        template = 'plotly_dark' if dark_mode else 'plotly'
+        if chart_type == 'bar':
+            fig = px.bar(df, x=selected_column, y=selected_y_axis, template=template)
+            if selected_category:
+                fig.update_traces(marker=dict(color=['#00d4ff' if x == selected_category else '#636efa' 
+                                                  for x in df[selected_column]]))
+        elif chart_type == 'pie':
+            fig = px.pie(df, names=selected_column, values=selected_y_axis, template=template)
+        elif chart_type == 'scatter':
+            fig = px.scatter(df, x=selected_column, y=selected_y_axis, template=template)
+            if selected_category:
+                fig.update_traces(marker=dict(size=[15 if x == selected_category else 8 
+                                                 for x in df[selected_column]]))
+        elif chart_type == 'line':
+            fig = px.line(df, x=selected_column, y=selected_y_axis, template=template)
+            if selected_category:
+                fig.add_scatter(x=[selected_category], y=[df[df[selected_column] == selected_category][selected_y_axis].iloc[0]],
+                              mode='markers', marker=dict(size=15, color='#00d4ff'), showlegend=False)
+        elif chart_type == 'heatmap':
+            numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
+            if len(numerical_cols) >= 2:
+                corr_matrix = df[numerical_cols].corr()
+                fig = ff.create_annotated_heatmap(z=corr_matrix.values, x=numerical_cols, y=numerical_cols,
+                                                colorscale='Plasma' if dark_mode else 'Viridis')
+            else:
+                fig = px.scatter(title="Not enough numerical columns for heatmap")
+        elif chart_type == 'box':
+            fig = px.box(df, x=selected_column, y=selected_y_axis, template=template)
+        elif chart_type == 'cluster':
+            numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
+            if len(numerical_cols) >= 2:
+                kmeans = KMeans(n_clusters=3, n_init=10)
+                features = df[numerical_cols].dropna()
+                df.loc[features.index, 'cluster'] = kmeans.fit_predict(features)
+                fig = px.scatter(df, x=numerical_cols[0], y=numerical_cols[1], color='cluster', template=template)
+            else:
+                fig = px.scatter(title="Not enough numerical columns for clustering")
+        elif chart_type == 'regression':
+            if (df[selected_column].dtype in ['int64', 'float64'] and 
+                df[selected_y_axis].dtype in ['int64', 'float64']):
+                X = df[[selected_column]].dropna()
+                y = df.loc[X.index, selected_y_axis]
+                model = LinearRegression()
+                model.fit(X, y)
+                df.loc[X.index, 'predicted'] = model.predict(X)
+                fig = px.scatter(df, x=selected_column, y=selected_y_axis, trendline="ols", template=template)
+                if selected_category:
+                    fig.update_traces(marker=dict(size=[15 if x == selected_category else 8 
+                                                     for x in df[selected_column]]))
+            else:
+                fig = px.scatter(title="Regression requires numerical X and Y axes")
         else:
-            color = None
-
-        if cluster_count and cluster_count > 0:
-            kmeans = KMeans(n_clusters=cluster_count, random_state=0)
-            features = df_copy[[selected_column, selected_y_axis]].dropna()
-            if len(features) > 0:
-                df_copy['cluster'] = kmeans.fit_predict(features)
-                color = 'cluster'
-
-        if chart_type == 'scatter':
-            fig = px.scatter(df_copy, x=x_data, y=y_data, color=color,
-                             title=f"{selected_column} vs {selected_y_axis}")
-        elif chart_type == 'bar':
-            fig = px.bar(df_copy, x=x_data, y=y_data, color=color,
-                         title=f"{selected_column} vs {selected_y_axis}")
-        else:  # line
-            fig = px.line(df_copy, x=x_data, y=y_data, color=color,
-                          title=f"{selected_column} vs {selected_y_axis}")
-
-        if dark_mode:
-            fig.update_layout(template="plotly_dark")
+            fig = px.scatter(title="Unsupported chart type")
         return fig
     except Exception as e:
         logger.error(f"Main chart generation error: {e}")
-        return px.scatter(title=f"Error generating chart: {str(e)}")
+        return px.scatter(title=f"Error: {str(e)}")
 
-def generate_pie_chart(df, selected_column, selected_y_axis, dark_mode, selected_category, transform_type):
-    if not selected_column or not selected_y_axis:
-        return px.scatter(title="No pie chart generated")
+def generate_pie_chart(df, selected_column, selected_y_axis, dark_mode, selected_category):
     try:
-        df_copy = df.copy()
-        data = transform_data(df_copy, selected_y_axis, transform_type)
-        fig = px.pie(df_copy, names=selected_column, values=data,
-                     title=f"Pie Chart of {selected_y_axis} by {selected_column}")
-        if dark_mode:
-            fig.update_layout(template="plotly_dark")
+        if not selected_column or not selected_y_axis:
+            return px.scatter(title="No pie chart generated")
+        fig = px.pie(df, names=selected_column, values=selected_y_axis, 
+                    template='plotly_dark' if dark_mode else 'plotly',
+                    title=f"Pie: {selected_column} Distribution")
+        if selected_category:
+            explode = [0.1 if x == selected_category else 0 for x in df[selected_column].unique()]
+            fig.update_traces(pull=explode, marker=dict(colors=['#00d4ff' if x == selected_category else '#636efa' 
+                                                      for x in df[selected_column].unique()]))
         return fig
     except Exception as e:
         logger.error(f"Pie chart generation error: {e}")
-        return px.scatter(title=f"Error generating pie chart: {str(e)}")
+        return px.scatter(title=f"Error: {str(e)}")
 
-def generate_line_chart(df, selected_column, selected_y_axis, dark_mode, selected_category, transform_type):
-    if not selected_column or not selected_y_axis:
-        return px.scatter(title="No line chart generated")
+def generate_line_chart(df, selected_column, selected_y_axis, dark_mode, selected_category):
     try:
-        df_copy = df.copy()
-        x_data = transform_data(df_copy, selected_column, transform_type)
-        y_data = transform_data(df_copy, selected_y_axis, transform_type)
-        fig = px.line(df_copy, x=x_data, y=y_data,
-                      title=f"Line Chart of {selected_y_axis} over {selected_column}")
-        if dark_mode:
-            fig.update_layout(template="plotly_dark")
+        if not selected_column or not selected_y_axis:
+            return px.scatter(title="No line chart generated")
+        fig = px.line(df, x=selected_column, y=selected_y_axis,
+                     template='plotly_dark' if dark_mode else 'plotly',
+                     title=f"Line: {selected_column} vs {selected_y_axis}")
+        if selected_category:
+            fig.add_scatter(x=[selected_category], y=[df[df[selected_column] == selected_category][selected_y_axis].iloc[0]],
+                          mode='markers', marker=dict(size=15, color='#00d4ff'), showlegend=False)
         return fig
     except Exception as e:
         logger.error(f"Line chart generation error: {e}")
-        return px.scatter(title=f"Error generating line chart: {str(e)}")
+        return px.scatter(title=f"Error: {str(e)}")
 
-# Sidebar content
+# Sidebar content with clear button
 sidebar = dbc.Col([
     dbc.Card([
         dbc.CardBody([
             html.H4("Controls", className="card-title text-light"),
-            dcc.Upload(id='upload-data', children=html.Button('Upload File 📁', className="btn btn-outline-cyan btn-block mb-3"), multiple=False, accept=".csv,.xlsx"),
-            dcc.Dropdown(id='column-filter', options=[], placeholder="Select a column", className="dropdown-blue mb-3"),
-            dcc.Dropdown(id='value-filter', options=[], placeholder="Filter values", className="dropdown-green mb-3"),
-            dcc.Dropdown(id='y-axis-dropdown', options=[], placeholder="Select Y-axis", className="dropdown-orange mb-3"),
+            dcc.Upload(
+                id='upload-data',
+                children=html.Button('Upload File 📁', className="btn btn-outline-cyan btn-block mb-3"),
+                multiple=False,
+                accept=".csv,.xlsx"
+            ),
+            html.Div(id='upload-message', className="mb-3 text-center text-light"),
+            dcc.Dropdown(id='column-filter', placeholder="Select a column", className="mb-3 dropdown-blue"),
+            dcc.Dropdown(id='value-filter', placeholder="Select values", multi=True, className="mb-3 dropdown-green"),
+            dcc.Dropdown(id='y-axis-dropdown', placeholder="Select Y-axis", className="mb-3 dropdown-orange"),
             dcc.Dropdown(id='chart-type', options=[
-                {'label': 'Scatter', 'value': 'scatter'},
-                {'label': 'Bar', 'value': 'bar'},
-                {'label': 'Line', 'value': 'line'}
-            ], placeholder="Select chart type", className="dropdown-purple mb-3"),
-            dcc.Checklist(id='dark-mode-toggle', options=[{'label': 'Dark Mode', 'value': 'dark'}], value=['dark'], className="mb-3"),
-            dcc.Checklist(id='outlier-toggle', options=[{'label': 'Show Outliers', 'value': 'outliers'}], value=[], className="mb-3"),
-            dcc.Input(id='cluster-count', type='number', placeholder="Number of clusters", value=3, className="mb-3"),
-            dcc.Dropdown(id='transform-type', options=[
-                {'label': 'None', 'value': 'none'},
-                {'label': 'Log', 'value': 'log'},
-                {'label': 'Normalize', 'value': 'normalize'}
-            ], placeholder="Transform type", className="mb-3"),
-            html.Button('Clear Selection', id='clear-selection', className="btn btn-outline-red btn-block mb-3"),
-            html.Button('Download Data', id='download-button', className="btn btn-outline-cyan btn-block mb-3"),
-            html.Button('Download Charts', id='download-chart-btn', className="btn btn-outline-cyan btn-block mb-3"),
+                {'label': 'Bar Chart', 'value': 'bar'},
+                {'label': 'Pie Chart', 'value': 'pie'},
+                {'label': 'Scatter Plot', 'value': 'scatter'},
+                {'label': 'Line Chart', 'value': 'line'},
+                {'label': 'Heatmap', 'value': 'heatmap'},
+                {'label': 'Box Plot', 'value': 'box'},
+                {'label': 'Clustering', 'value': 'cluster'},
+                {'label': 'Regression', 'value': 'regression'}
+            ], value='bar', className="mb-3 dropdown-purple"),
+            dbc.Switch(id='dark-mode-toggle', label='Dark Mode', value=True, className="mb-3 text-light"),
+            html.Button("Download Data 📥", id="download-button", className="btn btn-outline-cyan btn-block mb-3"),
+            html.Button("Download Charts 📊", id="download-chart-btn", className="btn btn-outline-cyan btn-block mb-3"),
+            html.Button("Clear Selection", id="clear-selection", className="btn btn-outline-red btn-block mb-3"),
+            html.H5("Insights", className="card-title text-light"),
+            html.Div(id='insights-panel', style={'maxHeight': '200px', 'overflowY': 'auto'})
         ])
     ], className="bg-card-dark border-0 shadow-sm")
 ], width=3, className="sidebar collapse show", id="sidebar")
 
-# Main content
+# Main content with summary statistics and modal
 main_content = dbc.Col([
     dbc.NavbarSimple(brand="📊 Advanced Data Analysis Dashboard", color="dark", dark=True, className="mb-4 navbar-dark"),
-    dcc.Graph(id='main-chart', className="mb-4"),
-    dcc.Graph(id='pie-chart', className="mb-4"),
-    dcc.Graph(id='line-chart', className="mb-4"),
-    dcc.Graph(id='main-chart-all', className="mb-4"),
-    dcc.Graph(id='pie-chart-all', className="mb-4"),
-    dcc.Graph(id='line-chart-all', className="mb-4"),
-    html.Div(id='insights-panel', className="text-light mb-4"),
-    dag.AgGrid(id='data-table', className="ag-theme-alpine-dark mb-4", rowData=[], columnDefs=[]),
-    html.Div(id='upload-message', className="text-light mb-4"),
-    html.Div(id='summary-stats', className="text-light mb-4"),
-    dcc.Store(id='download-charts-store'),
-    dcc.Download(id="download-charts"),
+    dbc.Card([
+        dbc.CardBody([
+            dbc.Tabs([
+                dbc.Tab(label="Main Chart", tab_id="main-tab", children=[
+                    dcc.Graph(id='main-chart', style={'height': '400px'})
+                ]),
+                dbc.Tab(label="Pie Chart", tab_id="pie-tab", children=[
+                    dcc.Graph(id='pie-chart', style={'height': '400px'})
+                ]),
+                dbc.Tab(label="Line Chart", tab_id="line-tab", children=[
+                    dcc.Graph(id='line-chart', style={'height': '400px'})
+                ]),
+                dbc.Tab(label="All Charts", tab_id="all-tab", children=[
+                    dbc.Row([
+                        dbc.Col(dcc.Graph(id='main-chart-all', style={'height': '300px'}), width=4),
+                        dbc.Col(dcc.Graph(id='pie-chart-all', style={'height': '300px'}), width=4),
+                        dbc.Col(dcc.Graph(id='line-chart-all', style={'height': '300px'}), width=4)
+                    ])
+                ])
+            ], id="chart-tabs", active_tab="main-tab", className="tabs-custom")
+        ])
+    ], className="bg-card-dark border-0 shadow-sm mb-4"),
+    dbc.Card([
+        dbc.CardBody([
+            html.H5("Summary Statistics", className="card-title text-light"),
+            html.Div(id='summary-stats')
+        ])
+    ], className="bg-card-dark border-0 shadow-sm mb-4"),
+    dbc.Card([
+        dbc.CardBody([
+            html.H5("Data Table", className="card-title text-light"),
+            dag.AgGrid(
+                id='data-table',
+                defaultColDef={"resizable": True, "sortable": True, "filter": True},
+                dashGridOptions={"pagination": True, "paginationPageSize": 10},
+                className="ag-theme-alpine-dark"
+            )
+        ])
+    ], className="bg-card-dark border-0 shadow-sm"),
     dcc.Download(id="download-dataframe-csv"),
+    dcc.Download(id="download-charts"),
     dcc.Store(id='selected-category'),
-    dcc.Interval(id='interval', interval=60000, n_intervals=0),
-    # Modal for enlarged chart
+    dcc.Store(id='download-charts-store'),
     dbc.Modal([
-        dbc.ModalHeader("Enlarged Chart", className="modal-dark"),
-        dbc.ModalBody(dcc.Graph(id='enlarged-chart')),
+        dbc.ModalHeader(dbc.ModalTitle("Enlarged Chart"), className="bg-card-dark text-light"),
+        dbc.ModalBody(dcc.Graph(id='enlarged-chart', style={'height': '70vh'}), className="bg-card-dark"),
         dbc.ModalFooter(
-            html.Button("Close", id="close-modal", className="btn btn-outline-red")
-        ),
-    ], id="chart-modal", size="lg", className="modal-dark", is_open=False),
+            dbc.Button("Close", id="close-modal", className="btn btn-outline-cyan")
+        )
+    ], id="chart-modal", size="xl", is_open=False, backdrop=True, className="modal-dark")
 ], width=9)
 
 # Layout
 app.layout = dbc.Container([
-    dbc.Row([sidebar, main_content], className="min-vh-100")
+    dbc.Row([
+        sidebar,
+        main_content
+    ], className="min-vh-100")
 ], fluid=True, className="bg-gradient-dark")
 
-# Main callback
+# Main callback with chart highlighting and deselection
 @app.callback(
-    [Output('column-filter', 'options'), Output('value-filter', 'options'), Output('y-axis-dropdown', 'options'),
-     Output('main-chart', 'figure'), Output('pie-chart', 'figure'), Output('line-chart', 'figure'),
-     Output('main-chart-all', 'figure'), Output('pie-chart-all', 'figure'), Output('line-chart-all', 'figure'),
-     Output('insights-panel', 'children'), Output('data-table', 'rowData'), Output('data-table', 'columnDefs'),
-     Output('upload-message', 'children'), Output('summary-stats', 'children'), Output('selected-category', 'data'),
+    [Output('column-filter', 'options'),
+     Output('value-filter', 'options'),
+     Output('y-axis-dropdown', 'options'),
+     Output('main-chart', 'figure'),
+     Output('pie-chart', 'figure'),
+     Output('line-chart', 'figure'),
+     Output('main-chart-all', 'figure'),
+     Output('pie-chart-all', 'figure'),
+     Output('line-chart-all', 'figure'),
+     Output('insights-panel', 'children'),
+     Output('data-table', 'rowData'),
+     Output('data-table', 'columnDefs'),
+     Output('upload-message', 'children'),
+     Output('summary-stats', 'children'),
+     Output('selected-category', 'data'),
      Output('download-charts-store', 'data')],
-    [Input('upload-data', 'contents'), Input('column-filter', 'value'), Input('value-filter', 'value'),
-     Input('y-axis-dropdown', 'value'), Input('chart-type', 'value'), Input('dark-mode-toggle', 'value'),
-     Input('main-chart', 'clickData'), Input('clear-selection', 'n_clicks'), Input('outlier-toggle', 'value'),
-     Input('cluster-count', 'value'), Input('transform-type', 'value'), Input('interval', 'n_intervals')],
+    [Input('upload-data', 'contents'),
+     Input('column-filter', 'value'),
+     Input('value-filter', 'value'),
+     Input('y-axis-dropdown', 'value'),
+     Input('chart-type', 'value'),
+     Input('dark-mode-toggle', 'value'),
+     Input('main-chart', 'clickData'),
+     Input('clear-selection', 'n_clicks')],
     [State('upload-data', 'filename')]
 )
-def update_dashboard(contents, selected_column, selected_values, selected_y_axis, chart_type, dark_mode, click_data, clear_clicks, show_outliers, cluster_count, transform_type, n_intervals, filename):
-    dark_mode = 'dark' in (dark_mode or [])
-    show_outliers = 'outliers' in (show_outliers or [])
+def update_dashboard(contents, selected_column, selected_values, selected_y_axis, chart_type, dark_mode, click_data, clear_clicks, filename):
+    try:
+        logger.info("update_dashboard callback triggered")
+        logger.info(f"Contents: {contents is not None}, Filename: {filename}")
+        ctx = dash.callback_context
+        triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
 
-    # Default outputs
-    column_options = []
-    value_options = []
-    y_axis_options = []
-    main_fig = px.scatter(title="Please select X and Y axes")
-    pie_fig = px.scatter(title="No pie chart generated")
-    line_fig = px.scatter(title="No line chart generated")
-    main_fig_all = px.scatter(title="All Data: Select X and Y axes")
-    pie_fig_all = px.scatter(title="All Data: No pie chart generated")
-    line_fig_all = px.scatter(title="All Data: No line chart generated")
-    insights = []
-    row_data = []
-    column_defs = []
-    upload_message = "No file uploaded yet."
-    summary_stats = "No data loaded."
-    selected_category = None
-    charts_data = {}
+        if not contents and data_store.df is None:
+            default_fig = px.scatter(title="Please upload a file")
+            return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + ["Please upload a file", "No data available", None, {}]
 
-    # Parse uploaded file
-    if contents:
-        df = parse_contents(contents, filename)
-        if df is not None:
-            upload_message = f"Uploaded: {filename} at {data_store.last_updated}"
-            column_options = [{'label': col, 'value': col} for col in df.columns]
-            y_axis_options = column_options
+        if triggered_id == 'upload-data':
+            df = parse_contents(contents, filename)
+            if df is None:
+                default_fig = px.scatter(title="Error loading file")
+                return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + ["❌ Error loading file", "Error loading data", None, {}]
+            data_store.df = df
+        else:
+            df = data_store.df
 
-            # Filter data
-            filtered_df = df.copy()
-            if selected_column and selected_values:
-                filtered_df = filtered_df[filtered_df[selected_column].isin(selected_values)]
-            data_store.filtered_df = filtered_df
+        if df is None:
+            default_fig = px.scatter(title="No data available")
+            return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + ["No data available", "No data available", None, {}]
 
-            # Update value filter options
-            if selected_column:
-                value_options = [{'label': str(val), 'value': val} for val in filtered_df[selected_column].unique()]
+        categorical_cols = df.select_dtypes(include=['object', 'datetime']).columns.tolist()
+        numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
 
-            # Generate charts for filtered data
-            if selected_column and selected_y_axis:
-                main_fig = generate_main_chart(filtered_df, selected_column, selected_y_axis, chart_type, dark_mode, selected_category, show_outliers, cluster_count, transform_type)
-                pie_fig = generate_pie_chart(filtered_df, selected_column, selected_y_axis, dark_mode, selected_category, transform_type)
-                line_fig = generate_line_chart(filtered_df, selected_column, selected_y_axis, dark_mode, selected_category, transform_type)
+        selected_column = selected_column or (categorical_cols[0] if categorical_cols else None)
+        selected_y_axis = selected_y_axis or (numerical_cols[0] if numerical_cols else None)
+        chart_type = chart_type or 'bar'
 
-            # Generate charts for all data
-            if selected_column and selected_y_axis:
-                main_fig_all = generate_main_chart(df, selected_column, selected_y_axis, chart_type, dark_mode, None, show_outliers, cluster_count, transform_type)
-                pie_fig_all = generate_pie_chart(df, selected_column, selected_y_axis, dark_mode, None, transform_type)
-                line_fig_all = generate_line_chart(df, selected_column, selected_y_axis, dark_mode, None, transform_type)
+        value_options = ([{'label': str(val), 'value': val} 
+                         for val in df[selected_column].dropna().unique()] 
+                         if selected_column in df.columns else [])
+        
+        df_filtered = df[df[selected_column].isin(selected_values)] if selected_column and selected_values else df.copy()
+        data_store.filtered_df = df_filtered  # Cache filtered data
 
-            # Generate insights
-            if selected_column and selected_y_axis:
-                insights.append(html.P(f"Mean {selected_y_axis}: {filtered_df[selected_y_axis].mean():.2f}"))
-                insights.append(html.P(f"Std Dev {selected_y_axis}: {filtered_df[selected_y_axis].std():.2f}"))
-
-            # Update data table
-            row_data = filtered_df.to_dict('records')
-            column_defs = [{'field': col} for col in filtered_df.columns]
-
-            # Summary stats
-            summary_stats = [
-                html.P(f"Rows: {len(filtered_df)}"),
-                html.P(f"Columns: {len(filtered_df.columns)}")
-            ]
-
-            # Save charts for download
-            charts = {'main': main_fig, 'pie': pie_fig, 'line': line_fig}
-            for chart_name, fig in charts.items():
-                img_bytes = fig.write_image("temp.png", engine="kaleido")
-                charts_data[chart_name] = base64.b64encode(img_bytes).decode('utf-8')
-
-    # Handle click data
-    if click_data and 'points' in click_data:
-        selected_category = click_data['points'][0].get('customdata', None)
-
-    # Clear selection
-    if clear_clicks:
+        # Handle selection and deselection
         selected_category = None
+        if triggered_id == 'main-chart' and click_data and chart_type in ['bar', 'scatter', 'line', 'regression']:
+            selected_category = click_data['points'][0].get('x') or click_data['points'][0].get('label')
+        elif triggered_id == 'clear-selection' and clear_clicks:
+            selected_category = None
 
-    return (column_options, value_options, y_axis_options, main_fig, pie_fig, line_fig,
-            main_fig_all, pie_fig_all, line_fig_all, insights, row_data, column_defs,
-            upload_message, summary_stats, selected_category, charts_data)
+        # Generate charts
+        main_fig = generate_main_chart(df_filtered, selected_column, selected_y_axis, chart_type, dark_mode, selected_category)
+        pie_fig = generate_pie_chart(df_filtered, selected_column, selected_y_axis, dark_mode, selected_category)
+        line_fig = generate_line_chart(df_filtered, selected_column, selected_y_axis, dark_mode, selected_category)
 
-# Modal callback
+        # Generate charts for all data
+        main_fig_all = generate_main_chart(df, selected_column, selected_y_axis, chart_type, dark_mode, None)
+        pie_fig_all = generate_pie_chart(df, selected_column, selected_y_axis, dark_mode, None)
+        line_fig_all = generate_line_chart(df, selected_column, selected_y_axis, dark_mode, None)
+
+        # Insights
+        insights = [html.P(f"🔹 {col}: {df[col].nunique()} unique | Type: {df[col].dtype}", className="text-light") 
+                    for col in df.columns]
+
+        # Summary statistics
+        summary_stats = "Select a Y-axis for statistics"
+        if selected_y_axis and selected_y_axis in numerical_cols:
+            stats = df_filtered[selected_y_axis].describe()
+            summary_stats = html.Ul([
+                html.Li(f"Mean: {stats['mean']:.2f}", className="text-light"),
+                html.Li(f"Median: {stats['50%']:.2f}", className="text-light"),
+                html.Li(f"Min: {stats['min']:.2f}", className="text-light"),
+                html.Li(f"Max: {stats['max']:.2f}", className="text-light"),
+                html.Li(f"Count: {int(stats['count'])}", className="text-light"),
+                html.Li(f"Std Dev: {stats['std']:.2f}", className="text-light")
+            ], className="list-unstyled")
+
+        column_defs = [{'field': col, 'headerName': col} for col in df.columns]
+
+        # Save charts for download
+        charts_data = {}
+        charts = {'main': main_fig, 'pie': pie_fig, 'line': line_fig}
+        for chart_name, fig in charts.items():
+            try:
+                logger.info(f"Generating image for chart: {chart_name}")
+                img_buffer = io.BytesIO()
+                fig.write_image(img_buffer, format="png", engine="kaleido")
+                img_bytes = img_buffer.getvalue()
+                if img_bytes:
+                    charts_data[chart_name] = base64.b64encode(img_bytes).decode('utf-8')
+                    logger.info(f"Chart {chart_name} saved successfully")
+                else:
+                    logger.error(f"Chart {chart_name} image generation returned empty bytes")
+            except Exception as e:
+                logger.error(f"Error generating chart image for {chart_name}: {e}")
+                charts_data[chart_name] = ""  # Fallback to empty string
+
+        return (
+            [{'label': col, 'value': col} for col in categorical_cols],
+            value_options,
+            [{'label': col, 'value': col} for col in numerical_cols],
+            main_fig,
+            pie_fig,
+            line_fig,
+            main_fig_all,
+            pie_fig_all,
+            line_fig_all,
+            insights,
+            df_filtered.to_dict('records'),
+            column_defs,
+            f"✅ Uploaded {filename} ({len(df)} rows)" if contents else f"Data loaded ({len(df)} rows)",
+            summary_stats,
+            selected_category,
+            charts_data
+        )
+    except Exception as e:
+        logger.error(f"Dashboard update error: {e}")
+        default_fig = px.scatter(title=f"Dashboard error: {str(e)}")
+        return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + [f"❌ Error: {str(e)}", "Error loading data", None, {}]
+
+# Modal callback for enlarged chart
 @app.callback(
-    [Output('chart-modal', 'is_open'), Output('enlarged-chart', 'figure')],
-    [Input('main-chart-all', 'clickData'), Input('pie-chart-all', 'clickData'), Input('line-chart-all', 'clickData'), Input('close-modal', 'n_clicks')],
-    [State('main-chart-all', 'figure'), State('pie-chart-all', 'figure'), State('line-chart-all', 'figure'), State('chart-modal', 'is_open')]
+    [Output('chart-modal', 'is_open'),
+     Output('enlarged-chart', 'figure')],
+    [Input('main-chart-all', 'clickData'),
+     Input('pie-chart-all', 'clickData'),
+     Input('line-chart-all', 'clickData'),
+     Input('close-modal', 'n_clicks')],
+    [State('main-chart-all', 'figure'),
+     State('pie-chart-all', 'figure'),
+     State('line-chart-all', 'figure'),
+     State('chart-modal', 'is_open')]
 )
 def toggle_modal(main_click, pie_click, line_click, close_click, main_fig, pie_fig, line_fig, is_open):
     ctx = dash.callback_context
     if not ctx.triggered:
-        return is_open, go.Figure()
-
-    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
-    if trigger_id == 'close-modal':
-        return False, go.Figure()
-
-    if trigger_id == 'main-chart-all' and main_click:
+        return False, {}
+    
+    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    
+    if triggered_id == 'close-modal' and close_click:
+        return False, {}
+    
+    if triggered_id == 'main-chart-all' and main_click:
         return True, main_fig
-    elif trigger_id == 'pie-chart-all' and pie_click:
+    elif triggered_id == 'pie-chart-all' and pie_click:
         return True, pie_fig
-    elif trigger_id == 'line-chart-all' and line_click:
+    elif triggered_id == 'line-chart-all' and line_click:
         return True, line_fig
-    return is_open, go.Figure()
+    
+    return is_open, {}
 
 # Download callbacks
 @app.callback(
@@ -386,8 +484,9 @@ def download_charts(n_clicks, charts_data):
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             for chart_name, chart_base64 in charts_data.items():
-                chart_bytes = base64.b64decode(chart_base64)
-                zip_file.writestr(f"{chart_name}_chart.png", chart_bytes)
+                if chart_base64:  # Skip empty strings
+                    chart_bytes = base64.b64decode(chart_base64)
+                    zip_file.writestr(f"{chart_name}_chart.png", chart_bytes)
         buffer.seek(0)
         return dcc.send_bytes(buffer.getvalue(), "charts.zip")
     return None
@@ -403,32 +502,120 @@ app.index_string = '''
         {%css%}
         <link rel="manifest" href="/static/manifest.json">
         <style>
-            .bg-gradient-dark { background: linear-gradient(135deg, #1f2a44 0%, #2e3b55 100%); }
-            .bg-card-dark { background-color: #2e3b55; }
-            .navbar-dark { background-color: #1f2a44 !important; }
-            .sidebar { transition: all 0.3s ease; }
-            .sidebar.collapsed { margin-left: -25%; }
-            .card { border-radius: 12px; transition: transform 0.2s ease, box-shadow 0.2s ease; border: 1px solid #ffffff10; }
-            .card:hover { transform: translateY(-5px); box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2); }
-            .btn-outline-cyan { border-color: #00d4ff; color: #00d4ff; transition: background-color 0.2s ease; }
-            .btn-outline-cyan:hover { background-color: #00d4ff20; color: #00d4ff; }
-            .btn-outline-red { border-color: #ff4d4f; color: #ff4d4f; transition: background-color 0.2s ease; }
-            .btn-outline-red:hover { background-color: #ff4d4f20; color: #ff4d4f; }
-            .tabs-custom .nav-link { color: #ffffff80; border-radius: 8px 8px 0 0; transition: background-color 0.2s ease; }
-            .tabs-custom .nav-link.active { color: #ffffff; background-color: #2e3b55; border-bottom: 3px solid #00d4ff; }
-            .tabs-custom .nav-link:hover { color: #ffffff; background-color: #ffffff10; }
-            .dropdown-blue .Select-control { background-color: #4682b4 !important; border-color: #4682b4 !important; }
-            .dropdown-green .Select-control { background-color: #2ecc71 !important; border-color: #2ecc71 !important; }
-            .dropdown-orange .Select-control { background-color: #e67e22 !important; border-color: #e67e22 !important; }
-            .dropdown-purple .Select-control { background-color: #9b59b6 !important; border-color: #9b59b6 !important; }
-            .Select-menu-outer { background-color: #2e3b55 !important; border-color: #ffffff20 !important; }
-            .Select-option { color: #ffffff !important; }
-            .Select-option.is-focused { background-color: #00d4ff20 !important; }
-            .text-light { color: #e6e6e6 !important; }
-            .modal-dark .modal-content { background-color: #2e3b55; border: 1px solid #ffffff10; animation: fadeIn 0.3s ease; }
-            .modal-dark .modal-header { border-bottom: 1px solid #ffffff20; }
-            .modal-dark .modal-footer { border-top: 1px solid #ffffff20; }
-            @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+            /* Background Gradient */
+            .bg-gradient-dark {
+                background: linear-gradient(135deg, #1f2a44 0%, #2e3b55 100%);
+            }
+            /* Card Background */
+            .bg-card-dark {
+                background-color: #2e3b55;
+            }
+            /* Navbar */
+            .navbar-dark {
+                background-color: #1f2a44 !important;
+            }
+            /* Sidebar */
+            .sidebar {
+                transition: all 0.3s ease;
+            }
+            .sidebar.collapsed {
+                margin-left: -25%;
+            }
+            .card {
+                border-radius: 12px;
+                transition: transform 0.2s ease, box-shadow 0.2s ease;
+                border: 1px solid #ffffff10;
+            }
+            .card:hover {
+                transform: translateY(-5px);
+                box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+            }
+            /* Buttons */
+            .btn-outline-cyan {
+                border-color: #00d4ff;
+                color: #00d4ff;
+                transition: background-color 0.2s ease;
+            }
+            .btn-outline-cyan:hover {
+                background-color: #00d4ff20;
+                color: #00d4ff;
+            }
+            .btn-outline-red {
+                border-color: #ff4d4f;
+                color: #ff4d4f;
+                transition: background-color 0.2s ease;
+            }
+            .btn-outline-red:hover {
+                background-color: #ff4d4f20;
+                color: #ff4d4f;
+            }
+            /* Tabs */
+            .tabs-custom .nav-link {
+                color: #ffffff80;
+                border-radius: 8px 8px 0 0;
+                transition: background-color 0.2s ease;
+            }
+            .tabs-custom .nav-link.active {
+                color: #ffffff;
+                background-color: #2e3b55;
+                border-bottom: 3px solid #00d4ff;
+            }
+            .tabs-custom .nav-link:hover {
+                color: #ffffff;
+                background-color: #ffffff10;
+            }
+            /* Colorful Dropdowns */
+            .dropdown-blue .Select-control {
+                background-color: #4682b4 !important;
+                border-color: #4682b4 !important;
+                transition: opacity 0.2s ease;
+            }
+            .dropdown-green .Select-control {
+                background-color: #2ecc71 !important;
+                border-color: #2ecc71 !important;
+                transition: opacity 0.2s ease;
+            }
+            .dropdown-orange .Select-control {
+                background-color: #e67e22 !important;
+                border-color: #e67e22 !important;
+                transition: opacity 0.2s ease;
+            }
+            .dropdown-purple .Select-control {
+                background-color: #9b59b6 !important;
+                border-color: #9b59b6 !important;
+                transition: opacity 0.2s ease;
+            }
+            .Select-menu-outer {
+                background-color: #2e3b55 !important;
+                border-color: #ffffff20 !important;
+            }
+            .Select-option {
+                color: #ffffff !important;
+                transition: background-color 0.1s ease;
+            }
+            .Select-option.is-focused {
+                background-color: #00d4ff20 !important;
+            }
+            /* Text */
+            .text-light {
+                color: #e6e6e6 !important;
+            }
+            /* Modal */
+            .modal-dark .modal-content {
+                background-color: #2e3b55;
+                border: 1px solid #ffffff10;
+                animation: fadeIn 0.3s ease;
+            }
+            .modal-dark .modal-header {
+                border-bottom: 1px solid #ffffff20;
+            }
+            .modal-dark .modal-footer {
+                border-top: 1px solid #ffffff20;
+            }
+            @keyframes fadeIn {
+                from { opacity: 0; }
+                to { opacity: 1; }
+            }
         </style>
     </head>
     <body>
