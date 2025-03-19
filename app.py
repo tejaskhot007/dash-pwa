@@ -16,7 +16,6 @@ import plotly.figure_factory as ff
 import dash_ag_grid as dag
 from datetime import datetime
 import logging
-import zipfile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -84,8 +83,13 @@ def parse_contents(contents, filename):
             raise ValueError("Unsupported file format")
         df = clean_data(df)
         if df is not None:
+            # Sample data to 500 rows
+            if len(df) > 500:
+                df = df.sample(n=500, random_state=42)
+                logger.info(f"Dataset sampled to 500 rows: {df.shape}")
             data_store.df = df
             data_store.last_updated = datetime.now()
+            data_store.filtered_df = None  # Reset filtered data
             logger.info(f"File parsed successfully: {df.shape}")
         else:
             logger.error("Data cleaning returned None")
@@ -216,7 +220,7 @@ sidebar = dbc.Col([
             ], value='bar', className="mb-3 dropdown-purple"),
             dbc.Switch(id='dark-mode-toggle', label='Dark Mode', value=True, className="mb-3 text-light"),
             html.Button("Download Data 📥", id="download-button", className="btn btn-outline-cyan btn-block mb-3"),
-            html.Button("Download Charts 📊", id="download-chart-btn", className="btn btn-outline-cyan btn-block mb-3"),
+            html.Button("Download Chart Data 📊", id="download-chart-btn", className="btn btn-outline-cyan btn-block mb-3"),
             html.Button("Clear Selection", id="clear-selection", className="btn btn-outline-red btn-block mb-3"),
             html.H5("Insights", className="card-title text-light"),
             html.Div(id='insights-panel', style={'maxHeight': '200px', 'overflowY': 'auto'})
@@ -260,16 +264,20 @@ main_content = dbc.Col([
             html.H5("Data Table", className="card-title text-light"),
             dag.AgGrid(
                 id='data-table',
-                defaultColDef={"resizable": True, "sortable": True, "filter": True},
+                defaultColDef={"resizable": True, "sortable": True, "filter": True, "editable": False},
                 dashGridOptions={"pagination": True, "paginationPageSize": 10},
-                className="ag-theme-alpine-dark"
+                className="ag-theme-alpine-dark",
+                style={'height': '400px', 'width': '100%'}
             )
         ])
     ], className="bg-card-dark border-0 shadow-sm"),
     dcc.Download(id="download-dataframe-csv"),
     dcc.Download(id="download-charts"),
     dcc.Store(id='selected-category'),
-    dcc.Store(id='download-charts-store'),
+    dcc.Store(id='upload-timestamp', data=0),  # Store to track upload events
+    dcc.Store(id='main-chart-store'),
+    dcc.Store(id='pie-chart-store'),
+    dcc.Store(id='line-chart-store'),
     dbc.Modal([
         dbc.ModalHeader(dbc.ModalTitle("Enlarged Chart"), className="bg-card-dark text-light"),
         dbc.ModalBody(dcc.Graph(id='enlarged-chart', style={'height': '70vh'}), className="bg-card-dark"),
@@ -286,6 +294,17 @@ app.layout = dbc.Container([
         main_content
     ], className="min-vh-100")
 ], fluid=True, className="bg-gradient-dark")
+
+# Callback to update timestamp on upload
+@app.callback(
+    Output('upload-timestamp', 'data'),
+    Input('upload-data', 'contents'),
+    State('upload-timestamp', 'data')
+)
+def update_timestamp(contents, current_timestamp):
+    if contents:
+        return current_timestamp + 1
+    return current_timestamp
 
 # Main callback with chart highlighting and deselection
 @app.callback(
@@ -304,8 +323,14 @@ app.layout = dbc.Container([
      Output('upload-message', 'children'),
      Output('summary-stats', 'children'),
      Output('selected-category', 'data'),
-     Output('download-charts-store', 'data')],
+     Output('main-chart-store', 'data'),
+     Output('pie-chart-store', 'data'),
+     Output('line-chart-store', 'data'),
+     Output('column-filter', 'value'),  # Reset dropdown
+     Output('value-filter', 'value'),   # Reset dropdown
+     Output('y-axis-dropdown', 'value')],  # Reset dropdown
     [Input('upload-data', 'contents'),
+     Input('upload-timestamp', 'data'),  # Trigger on upload event
      Input('column-filter', 'value'),
      Input('value-filter', 'value'),
      Input('y-axis-dropdown', 'value'),
@@ -315,33 +340,46 @@ app.layout = dbc.Container([
      Input('clear-selection', 'n_clicks')],
     [State('upload-data', 'filename')]
 )
-def update_dashboard(contents, selected_column, selected_values, selected_y_axis, chart_type, dark_mode, click_data, clear_clicks, filename):
+def update_dashboard(contents, upload_timestamp, selected_column, selected_values, selected_y_axis, chart_type, dark_mode, click_data, clear_clicks, filename):
     try:
         logger.info("update_dashboard callback triggered")
-        logger.info(f"Contents: {contents is not None}, Filename: {filename}")
+        logger.info(f"Contents: {contents is not None}, Filename: {filename}, Upload Timestamp: {upload_timestamp}")
         ctx = dash.callback_context
         triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
 
-        if not contents and data_store.df is None:
-            default_fig = px.scatter(title="Please upload a file")
-            return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + ["Please upload a file", "No data available", None, {}]
+        # Default outputs
+        default_fig = px.scatter(title="Please upload a file")
+        default_outputs = [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + ["Please upload a file", "No data available", None]
 
-        if triggered_id == 'upload-data':
+        # Reset dropdown values on new upload
+        reset_column = None
+        reset_values = []
+        reset_y_axis = None
+
+        if not contents and data_store.df is None:
+            return default_outputs + [None, None, None] + [reset_column, reset_values, reset_y_axis]
+
+        if triggered_id in ['upload-data', 'upload-timestamp']:
             df = parse_contents(contents, filename)
             if df is None:
                 default_fig = px.scatter(title="Error loading file")
-                return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + ["❌ Error loading file", "Error loading data", None, {}]
+                return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + ["❌ Error loading file", "Error loading data", None] + [None, None, None] + [reset_column, reset_values, reset_y_axis]
             data_store.df = df
+            # Reset selections on new upload
+            selected_column = None
+            selected_values = []
+            selected_y_axis = None
         else:
             df = data_store.df
 
         if df is None:
             default_fig = px.scatter(title="No data available")
-            return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + ["No data available", "No data available", None, {}]
+            return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + ["No data available", "No data available", None] + [None, None, None] + [reset_column, reset_values, reset_y_axis]
 
         categorical_cols = df.select_dtypes(include=['object', 'datetime']).columns.tolist()
         numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
 
+        # Set default selections if none are provided
         selected_column = selected_column or (categorical_cols[0] if categorical_cols else None)
         selected_y_axis = selected_y_axis or (numerical_cols[0] if numerical_cols else None)
         chart_type = chart_type or 'bar'
@@ -387,25 +425,26 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
                 html.Li(f"Std Dev: {stats['std']:.2f}", className="text-light")
             ], className="list-unstyled")
 
-        column_defs = [{'field': col, 'headerName': col} for col in df.columns]
+        # Prepare data for the table
+        row_data = df_filtered.to_dict('records')
+        logger.info(f"Row data prepared: {len(row_data)} rows")
 
-        # Save charts for download
-        charts_data = {}
-        charts = {'main': main_fig, 'pie': pie_fig, 'line': line_fig}
-        for chart_name, fig in charts.items():
-            try:
-                logger.info(f"Generating image for chart: {chart_name}")
-                img_buffer = io.BytesIO()
-                fig.write_image(img_buffer, format="png", engine="kaleido")
-                img_bytes = img_buffer.getvalue()
-                if img_bytes:
-                    charts_data[chart_name] = base64.b64encode(img_bytes).decode('utf-8')
-                    logger.info(f"Chart {chart_name} saved successfully")
-                else:
-                    logger.error(f"Chart {chart_name} image generation returned empty bytes")
-            except Exception as e:
-                logger.error(f"Error generating chart image for {chart_name}: {e}")
-                charts_data[chart_name] = ""  # Fallback to empty string
+        # Generate column definitions for AG Grid
+        if df_filtered.empty:
+            column_defs = []
+            logger.warning("DataFrame is empty, no columns to display in table")
+        else:
+            column_defs = [
+                {
+                    'field': col,
+                    'headerName': col.replace('_', ' ').title(),  # Human-readable header
+                    'filter': 'agTextColumnFilter' if df_filtered[col].dtype == 'object' else 'agNumberColumnFilter',
+                    'sortable': True,
+                    'resizable': True,
+                    'editable': False
+                } for col in df_filtered.columns
+            ]
+            logger.info(f"Column definitions generated: {column_defs}")
 
         return (
             [{'label': col, 'value': col} for col in categorical_cols],
@@ -418,17 +457,22 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
             pie_fig_all,
             line_fig_all,
             insights,
-            df_filtered.to_dict('records'),
+            row_data,
             column_defs,
             f"✅ Uploaded {filename} ({len(df)} rows)" if contents else f"Data loaded ({len(df)} rows)",
             summary_stats,
             selected_category,
-            charts_data
+            main_fig,
+            pie_fig,
+            line_fig,
+            selected_column,
+            selected_values,
+            selected_y_axis
         )
     except Exception as e:
         logger.error(f"Dashboard update error: {e}")
         default_fig = px.scatter(title=f"Dashboard error: {str(e)}")
-        return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + [f"❌ Error: {str(e)}", "Error loading data", None, {}]
+        return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + [f"❌ Error: {str(e)}", "Error loading data", None] + [None, None, None] + [None, [], None]
 
 # Modal callback for enlarged chart
 @app.callback(
@@ -476,20 +520,22 @@ def download_data(n_clicks):
 @app.callback(
     Output("download-charts", "data"),
     Input("download-chart-btn", "n_clicks"),
-    State("download-charts-store", "data"),
+    State("main-chart-store", "data"),
+    State("pie-chart-store", "data"),
+    State("line-chart-store", "data"),
     prevent_initial_call=True
 )
-def download_charts(n_clicks, charts_data):
-    if n_clicks and charts_data:
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for chart_name, chart_base64 in charts_data.items():
-                if chart_base64:  # Skip empty strings
-                    chart_bytes = base64.b64decode(chart_base64)
-                    zip_file.writestr(f"{chart_name}_chart.png", chart_bytes)
-        buffer.seek(0)
-        return dcc.send_bytes(buffer.getvalue(), "charts.zip")
-    return None
+def download_charts(n_clicks, main_fig, pie_fig, line_fig):
+    if not n_clicks:
+        return None
+    
+    # Download chart data as JSON
+    charts_data = {
+        'main_chart': main_fig,
+        'pie_chart': pie_fig,
+        'line_chart': line_fig
+    }
+    return dict(content=str(charts_data), filename="chart_data.json")
 
 # Custom index string with PWA support
 app.index_string = '''
