@@ -264,10 +264,21 @@ main_content = dbc.Col([
             html.H5("Data Table", className="card-title text-light"),
             dag.AgGrid(
                 id='data-table',
-                defaultColDef={"resizable": True, "sortable": True, "filter": True, "editable": False},
-                dashGridOptions={"pagination": True, "paginationPageSize": 10},
+                defaultColDef={
+                    "resizable": True,
+                    "sortable": True,
+                    "filter": True,
+                    "editable": False,
+                    "wrapText": True,
+                    "autoHeight": True
+                },
+                dashGridOptions={
+                    "pagination": True,
+                    "paginationPageSize": 10,
+                    "animateRows": True
+                },
                 className="ag-theme-alpine-dark",
-                style={'height': '400px', 'width': '100%'}
+                style={'height': '400px', 'width': '100%', 'overflow': 'auto'}
             )
         ])
     ], className="bg-card-dark border-0 shadow-sm"),
@@ -376,6 +387,9 @@ def update_dashboard(contents, upload_timestamp, selected_column, selected_value
             default_fig = px.scatter(title="No data available")
             return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + ["No data available", "No data available", None] + [None, None, None] + [reset_column, reset_values, reset_y_axis]
 
+        logger.info(f"DataFrame shape after loading: {df.shape}")
+        logger.info(f"DataFrame columns: {df.columns.tolist()}")
+
         categorical_cols = df.select_dtypes(include=['object', 'datetime']).columns.tolist()
         numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
 
@@ -390,6 +404,8 @@ def update_dashboard(contents, upload_timestamp, selected_column, selected_value
         
         df_filtered = df[df[selected_column].isin(selected_values)] if selected_column and selected_values else df.copy()
         data_store.filtered_df = df_filtered  # Cache filtered data
+        logger.info(f"Filtered DataFrame shape: {df_filtered.shape}")
+        logger.info(f"Filtered DataFrame columns: {df_filtered.columns.tolist()}")
 
         # Handle selection and deselection
         selected_category = None
@@ -426,19 +442,31 @@ def update_dashboard(contents, upload_timestamp, selected_column, selected_value
             ], className="list-unstyled")
 
         # Prepare data for the table
+        # Convert all columns to string to ensure AG Grid compatibility
+        df_filtered = df_filtered.astype(str)
         row_data = df_filtered.to_dict('records')
         logger.info(f"Row data prepared: {len(row_data)} rows")
 
         # Generate column definitions for AG Grid
         if df_filtered.empty:
-            column_defs = []
-            logger.warning("DataFrame is empty, no columns to display in table")
+            column_defs = [
+                {
+                    'field': 'message',
+                    'headerName': 'Message',
+                    'filter': 'agTextColumnFilter',
+                    'sortable': True,
+                    'resizable': True,
+                    'editable': False
+                }
+            ]
+            row_data = [{'message': 'No data available after filtering'}]
+            logger.warning("DataFrame is empty, displaying placeholder message in table")
         else:
             column_defs = [
                 {
                     'field': col,
                     'headerName': col.replace('_', ' ').title(),  # Human-readable header
-                    'filter': 'agTextColumnFilter' if df_filtered[col].dtype == 'object' else 'agNumberColumnFilter',
+                    'filter': 'agTextColumnFilter',  # All columns are strings now
                     'sortable': True,
                     'resizable': True,
                     'editable': False
