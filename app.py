@@ -34,6 +34,7 @@ app = dash.Dash(
 
 # Enable Flask to serve static files
 app.server.static_folder = 'static'
+server = app.server
 
 # Global data store
 class DataStore:
