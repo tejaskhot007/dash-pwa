@@ -6,6 +6,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 import base64
+import os
 import io
 import chardet
 import numpy as np
@@ -35,6 +36,7 @@ app = dash.Dash(
 # Enable Flask to serve static files
 app.server.static_folder = 'static'
 server = app.server
+port = int(os.environ.get("PORT", 8050))
 
 # Global data store
 class DataStore:
@@ -108,44 +110,131 @@ def detect_outliers(df, col):
     lower, upper = Q1 - 1.5 * IQR, Q3 + 1.5 * IQR
     return df[col].apply(lambda x: 'outlier' if x < lower or x > upper else 'normal')
 
-# Chart generation functions (unchanged, abbreviated for brevity)
+# Chart generation functions
 def generate_main_chart(df, selected_column, selected_y_axis, chart_type, dark_mode, selected_category, show_outliers, cluster_count, transform_type):
     if not selected_column or not selected_y_axis:
         return px.scatter(title="Please select X and Y axes")
-    # ... (rest of your original function unchanged) ...
-    return fig
+    try:
+        df_copy = df.copy()
+        x_data = transform_data(df_copy, selected_column, transform_type)
+        y_data = transform_data(df_copy, selected_y_axis, transform_type)
+
+        if show_outliers:
+            df_copy['outlier'] = detect_outliers(df_copy, selected_column)
+            color = 'outlier'
+        else:
+            color = None
+
+        if cluster_count and cluster_count > 0:
+            kmeans = KMeans(n_clusters=cluster_count, random_state=0)
+            features = df_copy[[selected_column, selected_y_axis]].dropna()
+            if len(features) > 0:
+                df_copy['cluster'] = kmeans.fit_predict(features)
+                color = 'cluster'
+
+        if chart_type == 'scatter':
+            fig = px.scatter(df_copy, x=x_data, y=y_data, color=color,
+                             title=f"{selected_column} vs {selected_y_axis}")
+        elif chart_type == 'bar':
+            fig = px.bar(df_copy, x=x_data, y=y_data, color=color,
+                         title=f"{selected_column} vs {selected_y_axis}")
+        else:  # line
+            fig = px.line(df_copy, x=x_data, y=y_data, color=color,
+                          title=f"{selected_column} vs {selected_y_axis}")
+
+        if dark_mode:
+            fig.update_layout(template="plotly_dark")
+        return fig
+    except Exception as e:
+        logger.error(f"Main chart generation error: {e}")
+        return px.scatter(title=f"Error generating chart: {str(e)}")
 
 def generate_pie_chart(df, selected_column, selected_y_axis, dark_mode, selected_category, transform_type):
     if not selected_column or not selected_y_axis:
         return px.scatter(title="No pie chart generated")
-    # ... (rest of your original function unchanged) ...
-    return fig
+    try:
+        df_copy = df.copy()
+        data = transform_data(df_copy, selected_y_axis, transform_type)
+        fig = px.pie(df_copy, names=selected_column, values=data,
+                     title=f"Pie Chart of {selected_y_axis} by {selected_column}")
+        if dark_mode:
+            fig.update_layout(template="plotly_dark")
+        return fig
+    except Exception as e:
+        logger.error(f"Pie chart generation error: {e}")
+        return px.scatter(title=f"Error generating pie chart: {str(e)}")
 
 def generate_line_chart(df, selected_column, selected_y_axis, dark_mode, selected_category, transform_type):
     if not selected_column or not selected_y_axis:
         return px.scatter(title="No line chart generated")
-    # ... (rest of your original function unchanged) ...
-    return fig
+    try:
+        df_copy = df.copy()
+        x_data = transform_data(df_copy, selected_column, transform_type)
+        y_data = transform_data(df_copy, selected_y_axis, transform_type)
+        fig = px.line(df_copy, x=x_data, y=y_data,
+                      title=f"Line Chart of {selected_y_axis} over {selected_column}")
+        if dark_mode:
+            fig.update_layout(template="plotly_dark")
+        return fig
+    except Exception as e:
+        logger.error(f"Line chart generation error: {e}")
+        return px.scatter(title=f"Error generating line chart: {str(e)}")
 
-# Sidebar content (unchanged, abbreviated)
+# Sidebar content
 sidebar = dbc.Col([
     dbc.Card([
         dbc.CardBody([
             html.H4("Controls", className="card-title text-light"),
             dcc.Upload(id='upload-data', children=html.Button('Upload File 📁', className="btn btn-outline-cyan btn-block mb-3"), multiple=False, accept=".csv,.xlsx"),
-            # ... (rest of your sidebar unchanged) ...
+            dcc.Dropdown(id='column-filter', options=[], placeholder="Select a column", className="dropdown-blue mb-3"),
+            dcc.Dropdown(id='value-filter', options=[], placeholder="Filter values", className="dropdown-green mb-3"),
+            dcc.Dropdown(id='y-axis-dropdown', options=[], placeholder="Select Y-axis", className="dropdown-orange mb-3"),
+            dcc.Dropdown(id='chart-type', options=[
+                {'label': 'Scatter', 'value': 'scatter'},
+                {'label': 'Bar', 'value': 'bar'},
+                {'label': 'Line', 'value': 'line'}
+            ], placeholder="Select chart type", className="dropdown-purple mb-3"),
+            dcc.Checklist(id='dark-mode-toggle', options=[{'label': 'Dark Mode', 'value': 'dark'}], value=['dark'], className="mb-3"),
+            dcc.Checklist(id='outlier-toggle', options=[{'label': 'Show Outliers', 'value': 'outliers'}], value=[], className="mb-3"),
+            dcc.Input(id='cluster-count', type='number', placeholder="Number of clusters", value=3, className="mb-3"),
+            dcc.Dropdown(id='transform-type', options=[
+                {'label': 'None', 'value': 'none'},
+                {'label': 'Log', 'value': 'log'},
+                {'label': 'Normalize', 'value': 'normalize'}
+            ], placeholder="Transform type", className="mb-3"),
+            html.Button('Clear Selection', id='clear-selection', className="btn btn-outline-red btn-block mb-3"),
+            html.Button('Download Data', id='download-button', className="btn btn-outline-cyan btn-block mb-3"),
+            html.Button('Download Charts', id='download-chart-btn', className="btn btn-outline-cyan btn-block mb-3"),
         ])
     ], className="bg-card-dark border-0 shadow-sm")
 ], width=3, className="sidebar collapse show", id="sidebar")
 
-# Main content (unchanged, abbreviated)
+# Main content
 main_content = dbc.Col([
     dbc.NavbarSimple(brand="📊 Advanced Data Analysis Dashboard", color="dark", dark=True, className="mb-4 navbar-dark"),
-    # ... (rest of your main content unchanged) ...
+    dcc.Graph(id='main-chart', className="mb-4"),
+    dcc.Graph(id='pie-chart', className="mb-4"),
+    dcc.Graph(id='line-chart', className="mb-4"),
+    dcc.Graph(id='main-chart-all', className="mb-4"),
+    dcc.Graph(id='pie-chart-all', className="mb-4"),
+    dcc.Graph(id='line-chart-all', className="mb-4"),
+    html.Div(id='insights-panel', className="text-light mb-4"),
+    dag.AgGrid(id='data-table', className="ag-theme-alpine-dark mb-4", rowData=[], columnDefs=[]),
+    html.Div(id='upload-message', className="text-light mb-4"),
+    html.Div(id='summary-stats', className="text-light mb-4"),
     dcc.Store(id='download-charts-store'),
     dcc.Download(id="download-charts"),
+    dcc.Download(id="download-dataframe-csv"),
     dcc.Store(id='selected-category'),
-    dcc.Interval(id='interval', interval=60000, n_intervals=0)
+    dcc.Interval(id='interval', interval=60000, n_intervals=0),
+    # Modal for enlarged chart
+    dbc.Modal([
+        dbc.ModalHeader("Enlarged Chart", className="modal-dark"),
+        dbc.ModalBody(dcc.Graph(id='enlarged-chart')),
+        dbc.ModalFooter(
+            html.Button("Close", id="close-modal", className="btn btn-outline-red")
+        ),
+    ], id="chart-modal", size="lg", className="modal-dark", is_open=False),
 ], width=9)
 
 # Layout
@@ -153,7 +242,7 @@ app.layout = dbc.Container([
     dbc.Row([sidebar, main_content], className="min-vh-100")
 ], fluid=True, className="bg-gradient-dark")
 
-# Main callback (unchanged, abbreviated)
+# Main callback
 @app.callback(
     [Output('column-filter', 'options'), Output('value-filter', 'options'), Output('y-axis-dropdown', 'options'),
      Output('main-chart', 'figure'), Output('pie-chart', 'figure'), Output('line-chart', 'figure'),
@@ -168,20 +257,114 @@ app.layout = dbc.Container([
     [State('upload-data', 'filename')]
 )
 def update_dashboard(contents, selected_column, selected_values, selected_y_axis, chart_type, dark_mode, click_data, clear_clicks, show_outliers, cluster_count, transform_type, n_intervals, filename):
-    # ... (your original callback unchanged) ...
-    return outputs
+    dark_mode = 'dark' in (dark_mode or [])
+    show_outliers = 'outliers' in (show_outliers or [])
 
-# Modal callback (unchanged, abbreviated)
+    # Default outputs
+    column_options = []
+    value_options = []
+    y_axis_options = []
+    main_fig = px.scatter(title="Please select X and Y axes")
+    pie_fig = px.scatter(title="No pie chart generated")
+    line_fig = px.scatter(title="No line chart generated")
+    main_fig_all = px.scatter(title="All Data: Select X and Y axes")
+    pie_fig_all = px.scatter(title="All Data: No pie chart generated")
+    line_fig_all = px.scatter(title="All Data: No line chart generated")
+    insights = []
+    row_data = []
+    column_defs = []
+    upload_message = "No file uploaded yet."
+    summary_stats = "No data loaded."
+    selected_category = None
+    charts_data = {}
+
+    # Parse uploaded file
+    if contents:
+        df = parse_contents(contents, filename)
+        if df is not None:
+            upload_message = f"Uploaded: {filename} at {data_store.last_updated}"
+            column_options = [{'label': col, 'value': col} for col in df.columns]
+            y_axis_options = column_options
+
+            # Filter data
+            filtered_df = df.copy()
+            if selected_column and selected_values:
+                filtered_df = filtered_df[filtered_df[selected_column].isin(selected_values)]
+            data_store.filtered_df = filtered_df
+
+            # Update value filter options
+            if selected_column:
+                value_options = [{'label': str(val), 'value': val} for val in filtered_df[selected_column].unique()]
+
+            # Generate charts for filtered data
+            if selected_column and selected_y_axis:
+                main_fig = generate_main_chart(filtered_df, selected_column, selected_y_axis, chart_type, dark_mode, selected_category, show_outliers, cluster_count, transform_type)
+                pie_fig = generate_pie_chart(filtered_df, selected_column, selected_y_axis, dark_mode, selected_category, transform_type)
+                line_fig = generate_line_chart(filtered_df, selected_column, selected_y_axis, dark_mode, selected_category, transform_type)
+
+            # Generate charts for all data
+            if selected_column and selected_y_axis:
+                main_fig_all = generate_main_chart(df, selected_column, selected_y_axis, chart_type, dark_mode, None, show_outliers, cluster_count, transform_type)
+                pie_fig_all = generate_pie_chart(df, selected_column, selected_y_axis, dark_mode, None, transform_type)
+                line_fig_all = generate_line_chart(df, selected_column, selected_y_axis, dark_mode, None, transform_type)
+
+            # Generate insights
+            if selected_column and selected_y_axis:
+                insights.append(html.P(f"Mean {selected_y_axis}: {filtered_df[selected_y_axis].mean():.2f}"))
+                insights.append(html.P(f"Std Dev {selected_y_axis}: {filtered_df[selected_y_axis].std():.2f}"))
+
+            # Update data table
+            row_data = filtered_df.to_dict('records')
+            column_defs = [{'field': col} for col in filtered_df.columns]
+
+            # Summary stats
+            summary_stats = [
+                html.P(f"Rows: {len(filtered_df)}"),
+                html.P(f"Columns: {len(filtered_df.columns)}")
+            ]
+
+            # Save charts for download
+            charts = {'main': main_fig, 'pie': pie_fig, 'line': line_fig}
+            for chart_name, fig in charts.items():
+                img_bytes = fig.write_image("temp.png", engine="kaleido")
+                charts_data[chart_name] = base64.b64encode(img_bytes).decode('utf-8')
+
+    # Handle click data
+    if click_data and 'points' in click_data:
+        selected_category = click_data['points'][0].get('customdata', None)
+
+    # Clear selection
+    if clear_clicks:
+        selected_category = None
+
+    return (column_options, value_options, y_axis_options, main_fig, pie_fig, line_fig,
+            main_fig_all, pie_fig_all, line_fig_all, insights, row_data, column_defs,
+            upload_message, summary_stats, selected_category, charts_data)
+
+# Modal callback
 @app.callback(
     [Output('chart-modal', 'is_open'), Output('enlarged-chart', 'figure')],
     [Input('main-chart-all', 'clickData'), Input('pie-chart-all', 'clickData'), Input('line-chart-all', 'clickData'), Input('close-modal', 'n_clicks')],
     [State('main-chart-all', 'figure'), State('pie-chart-all', 'figure'), State('line-chart-all', 'figure'), State('chart-modal', 'is_open')]
 )
 def toggle_modal(main_click, pie_click, line_click, close_click, main_fig, pie_fig, line_fig, is_open):
-    # ... (your original callback unchanged) ...
-    return is_open, figure
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return is_open, go.Figure()
 
-# Download callbacks (unchanged)
+    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    if trigger_id == 'close-modal':
+        return False, go.Figure()
+
+    if trigger_id == 'main-chart-all' and main_click:
+        return True, main_fig
+    elif trigger_id == 'pie-chart-all' and pie_click:
+        return True, pie_fig
+    elif trigger_id == 'line-chart-all' and line_click:
+        return True, line_fig
+    return is_open, go.Figure()
+
+# Download callbacks
 @app.callback(
     Output("download-dataframe-csv", "data"),
     Input("download-button", "n_clicks"),
@@ -269,4 +452,4 @@ app.index_string = '''
 '''
 
 if __name__ == '__main__':
-    app.run_server(host='0.0.0.0', port=8050)
+    app.run_server(host='0.0.0.0', port=port)
