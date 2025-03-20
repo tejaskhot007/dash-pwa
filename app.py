@@ -1,39 +1,38 @@
+import base64
+import io
+import logging
 import dash
-from dash import dcc, html, dash_table
-from dash.dependencies import Input, Output, State
+from dash import dcc, html, Input, Output, State, callback
 import dash_bootstrap_components as dbc
+import dash_ag_grid as dag
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import pandas as pd
-import base64
-import os
-import io
+import plotly.figure_factory as ff
+from datetime import datetime
 import chardet
 import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.cluster import KMeans
-import plotly.figure_factory as ff
-import dash_ag_grid as dag
-from datetime import datetime
-import logging
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize Dash App with PWA support
+# Initialize Dash App with a dark theme
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.DARKLY],
     suppress_callback_exceptions=True,
     title="📊 Advanced Data Analysis Dashboard",
-    assets_folder='static'  # Static files for PWA
+    meta_tags=[
+        {"name": "viewport", "content": "width=device-width, initial-scale=1"},
+        {"name": "theme-color", "content": "#343a40"},
+        {"name": "apple-mobile-web-app-capable", "content": "yes"},
+        {"name": "apple-mobile-web-app-status-bar-style", "content": "black-translucent"},
+    ],
 )
-
-# Enable Flask to serve static files
-app.server.static_folder = 'static'
 server = app.server
-port = int(os.environ.get("PORT", 8050))
 
 # Global data store
 class DataStore:
@@ -47,12 +46,10 @@ data_store = DataStore()
 # Data cleaning function
 def clean_data(df):
     try:
-        logger.info(f"Original columns: {df.columns.tolist()}")
         df.columns = (df.columns.str.strip()
                      .str.replace(" ", "_", regex=False)
                      .str.replace(r"[^\w\s]", "", regex=True)
                      .str.lower())
-        logger.info(f"Cleaned columns: {df.columns.tolist()}")
         for col in df.columns:
             if df[col].dtype == 'object':
                 try:
@@ -81,18 +78,19 @@ def parse_contents(contents, filename):
             df = pd.read_excel(io.BytesIO(decoded), engine='openpyxl')
         else:
             raise ValueError("Unsupported file format")
+        
+        # Clean the data
         df = clean_data(df)
-        if df is not None:
-            # Sample data to 500 rows
-            if len(df) > 500:
-                df = df.sample(n=500, random_state=42)
-                logger.info(f"Dataset sampled to 500 rows: {df.shape}")
-            data_store.df = df
-            data_store.last_updated = datetime.now()
-            data_store.filtered_df = None  # Reset filtered data
-            logger.info(f"File parsed successfully: {df.shape}")
-        else:
-            logger.error("Data cleaning returned None")
+        if df is None:
+            logger.error("Failed to clean data")
+            return None
+        
+        # Sample the dataset to reduce load (200 rows instead of 500)
+        if len(df) > 200:
+            df = df.sample(n=200, random_state=42)
+            logger.info(f"Dataset sampled to 200 rows: {df.shape}")
+        
+        logger.info(f"File parsed successfully: {df.shape}")
         return df
     except Exception as e:
         logger.error(f"File parsing error: {e}")
@@ -220,7 +218,6 @@ sidebar = dbc.Col([
             ], value='bar', className="mb-3 dropdown-purple"),
             dbc.Switch(id='dark-mode-toggle', label='Dark Mode', value=True, className="mb-3 text-light"),
             html.Button("Download Data 📥", id="download-button", className="btn btn-outline-cyan btn-block mb-3"),
-            html.Button("Download Chart Data 📊", id="download-chart-btn", className="btn btn-outline-cyan btn-block mb-3"),
             html.Button("Clear Selection", id="clear-selection", className="btn btn-outline-red btn-block mb-3"),
             html.H5("Insights", className="card-title text-light"),
             html.Div(id='insights-panel', style={'maxHeight': '200px', 'overflowY': 'auto'})
@@ -228,7 +225,7 @@ sidebar = dbc.Col([
     ], className="bg-card-dark border-0 shadow-sm")
 ], width=3, className="sidebar collapse show", id="sidebar")
 
-# Main content with summary statistics and modal
+# Main content with summary statistics, data table, and modal
 main_content = dbc.Col([
     dbc.NavbarSimple(brand="📊 Advanced Data Analysis Dashboard", color="dark", dark=True, className="mb-4 navbar-dark"),
     dbc.Card([
@@ -262,6 +259,7 @@ main_content = dbc.Col([
     dbc.Card([
         dbc.CardBody([
             html.H5("Data Table", className="card-title text-light"),
+            html.Div(id='data-table-debug'),  # Debug output for rows and columns
             dag.AgGrid(
                 id='data-table',
                 defaultColDef={
@@ -270,32 +268,34 @@ main_content = dbc.Col([
                     "filter": True,
                     "editable": False,
                     "wrapText": True,
-                    "autoHeight": True
+                    "autoHeight": True,
+                    "minWidth": 100,
                 },
                 dashGridOptions={
                     "pagination": True,
                     "paginationPageSize": 10,
-                    "animateRows": True
+                    "paginationPageSizeSelector": [10, 20, 50, 100],  # Ensure 10 is included
+                    "animateRows": True,
+                    "suppressRowClickSelection": True,
+                    "rowBuffer": 0,
+                    "enableCellTextSelection": True,
+                    "domLayout": "normal",  # Ensure proper layout
                 },
                 className="ag-theme-alpine-dark",
-                style={'height': '400px', 'width': '100%', 'overflow': 'auto'}
+                style={'height': '400px', 'width': '100%', 'overflow': 'auto', 'border': '1px solid #ccc'},
+                loading_state={'is_loading': False, 'component_name': 'data-table'}  # Explicitly set loading_state
             )
         ])
     ], className="bg-card-dark border-0 shadow-sm"),
     dcc.Download(id="download-dataframe-csv"),
-    dcc.Download(id="download-charts"),
-    dcc.Store(id='selected-category'),
-    dcc.Store(id='upload-timestamp', data=0),  # Store to track upload events
-    dcc.Store(id='main-chart-store'),
-    dcc.Store(id='pie-chart-store'),
-    dcc.Store(id='line-chart-store'),
     dbc.Modal([
         dbc.ModalHeader(dbc.ModalTitle("Enlarged Chart"), className="bg-card-dark text-light"),
         dbc.ModalBody(dcc.Graph(id='enlarged-chart', style={'height': '70vh'}), className="bg-card-dark"),
         dbc.ModalFooter(
             dbc.Button("Close", id="close-modal", className="btn btn-outline-cyan")
         )
-    ], id="chart-modal", size="xl", is_open=False, backdrop=True, className="modal-dark")
+    ], id="chart-modal", size="xl", is_open=False, backdrop=True, className="modal-dark"),
+    dcc.Store(id='selected-category')
 ], width=9)
 
 # Layout
@@ -306,17 +306,6 @@ app.layout = dbc.Container([
     ], className="min-vh-100")
 ], fluid=True, className="bg-gradient-dark")
 
-# Callback to update timestamp on upload
-@app.callback(
-    Output('upload-timestamp', 'data'),
-    Input('upload-data', 'contents'),
-    State('upload-timestamp', 'data')
-)
-def update_timestamp(contents, current_timestamp):
-    if contents:
-        return current_timestamp + 1
-    return current_timestamp
-
 # Main callback with chart highlighting and deselection
 @app.callback(
     [Output('column-filter', 'options'),
@@ -325,23 +314,14 @@ def update_timestamp(contents, current_timestamp):
      Output('main-chart', 'figure'),
      Output('pie-chart', 'figure'),
      Output('line-chart', 'figure'),
-     Output('main-chart-all', 'figure'),
-     Output('pie-chart-all', 'figure'),
-     Output('line-chart-all', 'figure'),
      Output('insights-panel', 'children'),
      Output('data-table', 'rowData'),
      Output('data-table', 'columnDefs'),
      Output('upload-message', 'children'),
      Output('summary-stats', 'children'),
      Output('selected-category', 'data'),
-     Output('main-chart-store', 'data'),
-     Output('pie-chart-store', 'data'),
-     Output('line-chart-store', 'data'),
-     Output('column-filter', 'value'),  # Reset dropdown
-     Output('value-filter', 'value'),   # Reset dropdown
-     Output('y-axis-dropdown', 'value')],  # Reset dropdown
+     Output('data-table-debug', 'children')],  # Debug output
     [Input('upload-data', 'contents'),
-     Input('upload-timestamp', 'data'),  # Trigger on upload event
      Input('column-filter', 'value'),
      Input('value-filter', 'value'),
      Input('y-axis-dropdown', 'value'),
@@ -351,45 +331,43 @@ def update_timestamp(contents, current_timestamp):
      Input('clear-selection', 'n_clicks')],
     [State('upload-data', 'filename')]
 )
-def update_dashboard(contents, upload_timestamp, selected_column, selected_values, selected_y_axis, chart_type, dark_mode, click_data, clear_clicks, filename):
+def update_dashboard(contents, selected_column, selected_values, selected_y_axis, chart_type, dark_mode, click_data, clear_clicks, filename):
     try:
         logger.info("update_dashboard callback triggered")
-        logger.info(f"Contents: {contents is not None}, Filename: {filename}, Upload Timestamp: {upload_timestamp}")
+        logger.info(f"Contents: {contents is not None}, Filename: {filename}")
+
         ctx = dash.callback_context
         triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
 
         # Default outputs
         default_fig = px.scatter(title="Please upload a file")
-        default_outputs = [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + ["Please upload a file", "No data available", None]
-
-        # Reset dropdown values on new upload
-        reset_column = None
-        reset_values = []
-        reset_y_axis = None
+        default_outputs = [[] for _ in range(3)] + [default_fig] * 3 + [[] for _ in range(3)] + ["Please upload a file", "No data available", None, "No data"]
 
         if not contents and data_store.df is None:
-            return default_outputs + [None, None, None] + [reset_column, reset_values, reset_y_axis]
+            logger.info("No contents and no stored data, returning default outputs")
+            return default_outputs
 
-        if triggered_id in ['upload-data', 'upload-timestamp']:
+        if triggered_id == 'upload-data':
+            logger.info("Processing new upload")
             df = parse_contents(contents, filename)
             if df is None:
+                logger.error("Failed to parse contents")
                 default_fig = px.scatter(title="Error loading file")
-                return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + ["❌ Error loading file", "Error loading data", None] + [None, None, None] + [reset_column, reset_values, reset_y_axis]
+                return [[] for _ in range(3)] + [default_fig] * 3 + [[] for _ in range(3)] + ["❌ Error loading file", "Error loading data", None, "Error"]
             data_store.df = df
-            # Reset selections on new upload
-            selected_column = None
-            selected_values = []
-            selected_y_axis = None
         else:
+            logger.info("Using stored DataFrame")
             df = data_store.df
 
         if df is None:
+            logger.error("DataFrame is None")
             default_fig = px.scatter(title="No data available")
-            return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + ["No data available", "No data available", None] + [None, None, None] + [reset_column, reset_values, reset_y_axis]
+            return [[] for _ in range(3)] + [default_fig] * 3 + [[] for _ in range(3)] + ["No data available", "No data available", None, "No data"]
 
         logger.info(f"DataFrame shape after loading: {df.shape}")
         logger.info(f"DataFrame columns: {df.columns.tolist()}")
 
+        logger.info("Selecting categorical and numerical columns")
         categorical_cols = df.select_dtypes(include=['object', 'datetime']).columns.tolist()
         numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
 
@@ -398,10 +376,12 @@ def update_dashboard(contents, upload_timestamp, selected_column, selected_value
         selected_y_axis = selected_y_axis or (numerical_cols[0] if numerical_cols else None)
         chart_type = chart_type or 'bar'
 
+        logger.info("Generating value options for dropdown")
         value_options = ([{'label': str(val), 'value': val} 
                          for val in df[selected_column].dropna().unique()] 
                          if selected_column in df.columns else [])
         
+        logger.info("Filtering DataFrame")
         df_filtered = df[df[selected_column].isin(selected_values)] if selected_column and selected_values else df.copy()
         data_store.filtered_df = df_filtered  # Cache filtered data
         logger.info(f"Filtered DataFrame shape: {df_filtered.shape}")
@@ -410,25 +390,27 @@ def update_dashboard(contents, upload_timestamp, selected_column, selected_value
         # Handle selection and deselection
         selected_category = None
         if triggered_id == 'main-chart' and click_data and chart_type in ['bar', 'scatter', 'line', 'regression']:
+            logger.info("Handling main chart click data")
             selected_category = click_data['points'][0].get('x') or click_data['points'][0].get('label')
         elif triggered_id == 'clear-selection' and clear_clicks:
+            logger.info("Clearing selection")
             selected_category = None
 
-        # Generate charts
+        # Generate charts for main tabs
+        logger.info("Generating main chart")
         main_fig = generate_main_chart(df_filtered, selected_column, selected_y_axis, chart_type, dark_mode, selected_category)
+        logger.info("Generating pie chart")
         pie_fig = generate_pie_chart(df_filtered, selected_column, selected_y_axis, dark_mode, selected_category)
+        logger.info("Generating line chart")
         line_fig = generate_line_chart(df_filtered, selected_column, selected_y_axis, dark_mode, selected_category)
 
-        # Generate charts for all data
-        main_fig_all = generate_main_chart(df, selected_column, selected_y_axis, chart_type, dark_mode, None)
-        pie_fig_all = generate_pie_chart(df, selected_column, selected_y_axis, dark_mode, None)
-        line_fig_all = generate_line_chart(df, selected_column, selected_y_axis, dark_mode, None)
-
         # Insights
+        logger.info("Generating insights")
         insights = [html.P(f"🔹 {col}: {df[col].nunique()} unique | Type: {df[col].dtype}", className="text-light") 
                     for col in df.columns]
 
         # Summary statistics
+        logger.info("Generating summary statistics")
         summary_stats = "Select a Y-axis for statistics"
         if selected_y_axis and selected_y_axis in numerical_cols:
             stats = df_filtered[selected_y_axis].describe()
@@ -442,12 +424,15 @@ def update_dashboard(contents, upload_timestamp, selected_column, selected_value
             ], className="list-unstyled")
 
         # Prepare data for the table
-        # Convert all columns to string to ensure AG Grid compatibility
+        logger.info("Converting DataFrame to string for AG Grid")
         df_filtered = df_filtered.astype(str)
+        logger.info("Preparing row data")
         row_data = df_filtered.to_dict('records')
         logger.info(f"Row data prepared: {len(row_data)} rows")
+        logger.info(f"Sample row data: {row_data[:2] if row_data else 'Empty'}")
 
         # Generate column definitions for AG Grid
+        logger.info("Generating column definitions")
         if df_filtered.empty:
             column_defs = [
                 {
@@ -465,15 +450,19 @@ def update_dashboard(contents, upload_timestamp, selected_column, selected_value
             column_defs = [
                 {
                     'field': col,
-                    'headerName': col.replace('_', ' ').title(),  # Human-readable header
-                    'filter': 'agTextColumnFilter',  # All columns are strings now
+                    'headerName': col.replace('_', ' ').title(),
+                    'filter': 'agTextColumnFilter',
                     'sortable': True,
                     'resizable': True,
                     'editable': False
                 } for col in df_filtered.columns
             ]
-            logger.info(f"Column definitions generated: {column_defs}")
+        logger.info(f"Column definitions generated: {column_defs}")
 
+        # Debug output
+        debug_info = f"Rows: {len(row_data)}, Columns: {len(column_defs)}"
+
+        logger.info("Returning callback outputs")
         return (
             [{'label': col, 'value': col} for col in categorical_cols],
             value_options,
@@ -481,26 +470,50 @@ def update_dashboard(contents, upload_timestamp, selected_column, selected_value
             main_fig,
             pie_fig,
             line_fig,
-            main_fig_all,
-            pie_fig_all,
-            line_fig_all,
             insights,
             row_data,
             column_defs,
             f"✅ Uploaded {filename} ({len(df)} rows)" if contents else f"Data loaded ({len(df)} rows)",
             summary_stats,
             selected_category,
-            main_fig,
-            pie_fig,
-            line_fig,
-            selected_column,
-            selected_values,
-            selected_y_axis
+            debug_info
         )
     except Exception as e:
-        logger.error(f"Dashboard update error: {e}")
+        logger.error(f"Dashboard update error: {str(e)}", exc_info=True)
         default_fig = px.scatter(title=f"Dashboard error: {str(e)}")
-        return [[] for _ in range(3)] + [default_fig] * 6 + [[] for _ in range(3)] + [f"❌ Error: {str(e)}", "Error loading data", None] + [None, None, None] + [None, [], None]
+        return [[] for _ in range(3)] + [default_fig] * 3 + [[] for _ in range(3)] + [f"❌ Error: {str(e)}", "Error loading data", None, "Error"]
+
+# Separate callback for "All Charts" tab to reduce load
+@app.callback(
+    [Output('main-chart-all', 'figure'),
+     Output('pie-chart-all', 'figure'),
+     Output('line-chart-all', 'figure')],
+    [Input('chart-tabs', 'active_tab'),
+     Input('column-filter', 'value'),
+     Input('value-filter', 'value'),
+     Input('y-axis-dropdown', 'value'),
+     Input('chart-type', 'value'),
+     Input('dark-mode-toggle', 'value')]
+)
+def update_all_charts_tab(active_tab, selected_column, selected_values, selected_y_axis, chart_type, dark_mode):
+    try:
+        if active_tab != 'all-tab':
+            return [px.scatter()] * 3  # Return empty figures if not on "All Charts" tab
+
+        if data_store.df is None:
+            return [px.scatter(title="No data available")] * 3
+
+        df = data_store.df
+        df_filtered = df[df[selected_column].isin(selected_values)] if selected_column and selected_values else df.copy()
+
+        main_fig_all = generate_main_chart(df, selected_column, selected_y_axis, chart_type, dark_mode, None)
+        pie_fig_all = generate_pie_chart(df, selected_column, selected_y_axis, dark_mode, None)
+        line_fig_all = generate_line_chart(df, selected_column, selected_y_axis, dark_mode, None)
+
+        return main_fig_all, pie_fig_all, line_fig_all
+    except Exception as e:
+        logger.error(f"All charts update error: {str(e)}")
+        return [px.scatter(title=f"Error: {str(e)}")] * 3
 
 # Modal callback for enlarged chart
 @app.callback(
@@ -534,7 +547,7 @@ def toggle_modal(main_click, pie_click, line_click, close_click, main_fig, pie_f
     
     return is_open, {}
 
-# Download callbacks
+# Download callback
 @app.callback(
     Output("download-dataframe-csv", "data"),
     Input("download-button", "n_clicks"),
@@ -545,27 +558,7 @@ def download_data(n_clicks):
         return dcc.send_data_frame(data_store.df.to_csv, "dashboard_data.csv")
     return None
 
-@app.callback(
-    Output("download-charts", "data"),
-    Input("download-chart-btn", "n_clicks"),
-    State("main-chart-store", "data"),
-    State("pie-chart-store", "data"),
-    State("line-chart-store", "data"),
-    prevent_initial_call=True
-)
-def download_charts(n_clicks, main_fig, pie_fig, line_fig):
-    if not n_clicks:
-        return None
-    
-    # Download chart data as JSON
-    charts_data = {
-        'main_chart': main_fig,
-        'pie_chart': pie_fig,
-        'line_chart': line_fig
-    }
-    return dict(content=str(charts_data), filename="chart_data.json")
-
-# Custom index string with PWA support
+# Custom CSS for optimized color combination and animations
 app.index_string = '''
 <!DOCTYPE html>
 <html>
@@ -574,7 +567,6 @@ app.index_string = '''
         <title>{%title%}</title>
         {%favicon%}
         {%css%}
-        <link rel="manifest" href="/static/manifest.json">
         <style>
             /* Background Gradient */
             .bg-gradient-dark {
@@ -698,19 +690,10 @@ app.index_string = '''
             {%config%}
             {%scripts%}
             {%renderer%}
-            <script>
-                if ('serviceWorker' in navigator) {
-                    window.addEventListener('load', () => {
-                        navigator.serviceWorker.register('/static/sw.js')
-                            .then(reg => console.log('Service Worker registered'))
-                            .catch(err => console.log('Service Worker registration failed: ', err));
-                    });
-                }
-            </script>
         </footer>
     </body>
 </html>
 '''
 
 if __name__ == '__main__':
-    app.run_server(host='0.0.0.0', port=port)
+    app.run_server(debug=True, port=8050)
