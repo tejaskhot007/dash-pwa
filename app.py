@@ -12,8 +12,8 @@ import plotly.figure_factory as ff
 from datetime import datetime
 import chardet
 import numpy as np
-# from sklearn.linear_model import LinearRegression
-# from sklearn.cluster import KMeans
+from sklearn.linear_model import LinearRegression
+from sklearn.cluster import KMeans
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -126,9 +126,28 @@ def generate_main_chart(df, selected_column, selected_y_axis, chart_type, dark_m
         elif chart_type == 'box':
             fig = px.box(df, x=selected_column, y=selected_y_axis, template=template)
         elif chart_type == 'cluster':
-            fig = px.scatter(title="Clustering not available (scikit-learn not installed)")
+            numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
+            if len(numerical_cols) >= 2:
+                kmeans = KMeans(n_clusters=3, n_init=10)
+                features = df[numerical_cols].dropna()
+                df.loc[features.index, 'cluster'] = kmeans.fit_predict(features)
+                fig = px.scatter(df, x=numerical_cols[0], y=numerical_cols[1], color='cluster', template=template)
+            else:
+                fig = px.scatter(title="Not enough numerical columns for clustering")
         elif chart_type == 'regression':
-            fig = px.scatter(title="Regression not available (scikit-learn not installed)")
+            if (df[selected_column].dtype in ['int64', 'float64'] and 
+                df[selected_y_axis].dtype in ['int64', 'float64']):
+                X = df[[selected_column]].dropna()
+                y = df.loc[X.index, selected_y_axis]
+                model = LinearRegression()
+                model.fit(X, y)
+                df.loc[X.index, 'predicted'] = model.predict(X)
+                fig = px.scatter(df, x=selected_column, y=selected_y_axis, trendline="ols", template=template)
+                if selected_category:
+                    fig.update_traces(marker=dict(size=[15 if x == selected_category else 8 
+                                                     for x in df[selected_column]]))
+            else:
+                fig = px.scatter(title="Regression requires numerical X and Y axes")
         else:
             fig = px.scatter(title="Unsupported chart type")
         return fig
