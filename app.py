@@ -85,10 +85,10 @@ def parse_contents(contents, filename):
             logger.error("Failed to clean data")
             return None
         
-        # Sample the dataset to reduce load (200 rows instead of 500)
-        if len(df) > 200:
-            df = df.sample(n=200, random_state=42)
-            logger.info(f"Dataset sampled to 200 rows: {df.shape}")
+        # Sample the dataset to reduce load (100 rows for Render free tier)
+        if len(df) > 100:
+            df = df.sample(n=100, random_state=42)
+            logger.info(f"Dataset sampled to 100 rows: {df.shape}")
         
         logger.info(f"File parsed successfully: {df.shape}")
         return df
@@ -279,12 +279,23 @@ main_content = dbc.Col([
                     "suppressRowClickSelection": True,
                     "rowBuffer": 0,
                     "enableCellTextSelection": True,
-                    "domLayout": "normal",  # Ensure proper layout
+                    "domLayout": "normal",
                 },
                 className="ag-theme-alpine-dark",
                 style={'height': '400px', 'width': '100%', 'overflow': 'auto', 'border': '1px solid #ccc'},
-                loading_state={'is_loading': False, 'component_name': 'data-table'}  # Explicitly set loading_state
             )
+            # Fallback: Uncomment the following to use dash_table.DataTable if AG Grid fails
+            # import dash_table
+            # dash_table.DataTable(
+            #     id='data-table',
+            #     columns=[{"name": i, "id": i} for i in df_filtered.columns] if 'df_filtered' in locals() else [],
+            #     data=df_filtered.to_dict('records') if 'df_filtered' in locals() else [],
+            #     style_table={'overflowX': 'auto'},
+            #     style_cell={'textAlign': 'left'},
+            #     style_header={'backgroundColor': 'rgb(30, 30, 30)', 'color': 'white'},
+            #     style_data={'backgroundColor': 'rgb(50, 50, 50)', 'color': 'white'},
+            #     page_size=10,
+            # )
         ])
     ], className="bg-card-dark border-0 shadow-sm"),
     dcc.Download(id="download-dataframe-csv"),
@@ -320,7 +331,7 @@ app.layout = dbc.Container([
      Output('upload-message', 'children'),
      Output('summary-stats', 'children'),
      Output('selected-category', 'data'),
-     Output('data-table-debug', 'children')],  # Debug output
+     Output('data-table-debug', 'children')],
     [Input('upload-data', 'contents'),
      Input('column-filter', 'value'),
      Input('value-filter', 'value'),
