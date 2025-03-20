@@ -227,19 +227,19 @@ main_content = dbc.Col([
         dbc.CardBody([
             dbc.Tabs([
                 dbc.Tab(label="Main Chart", tab_id="main-tab", children=[
-                    dcc.Graph(id='main-chart', style={'height': '400px'})
+                    dcc.Graph(id='main-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
                 ]),
                 dbc.Tab(label="Pie Chart", tab_id="pie-tab", children=[
-                    dcc.Graph(id='pie-chart', style={'height': '400px'})
+                    dcc.Graph(id='pie-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
                 ]),
                 dbc.Tab(label="Line Chart", tab_id="line-tab", children=[
-                    dcc.Graph(id='line-chart', style={'height': '400px'})
+                    dcc.Graph(id='line-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
                 ]),
                 dbc.Tab(label="All Charts", tab_id="all-tab", children=[
                     dbc.Row([
-                        dbc.Col(dcc.Graph(id='main-chart-all', style={'height': '300px'}), width=4),
-                        dbc.Col(dcc.Graph(id='pie-chart-all', style={'height': '300px'}), width=4),
-                        dbc.Col(dcc.Graph(id='line-chart-all', style={'height': '300px'}), width=4)
+                        dbc.Col(dcc.Graph(id='main-chart-all', style={'height': '300px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']}), width=4),
+                        dbc.Col(dcc.Graph(id='pie-chart-all', style={'height': '300px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']}), width=4),
+                        dbc.Col(dcc.Graph(id='line-chart-all', style={'height': '300px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']}), width=4)
                     ])
                 ])
             ], id="chart-tabs", active_tab="main-tab", className="tabs-custom")
@@ -273,7 +273,7 @@ main_content = dbc.Col([
     dcc.Download(id="download-dataframe-csv"),
     dbc.Modal([
         dbc.ModalHeader(dbc.ModalTitle("Enlarged Chart"), className="bg-card-dark text-light"),
-        dbc.ModalBody(dcc.Graph(id='enlarged-chart', style={'height': '70vh'}), className="bg-card-dark"),
+        dbc.ModalBody(dcc.Graph(id='enlarged-chart', style={'height': '70vh'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']}), className="bg-card-dark"),
         dbc.ModalFooter(
             dbc.Button("Close", id="close-modal", className="btn btn-outline-cyan")
         )
@@ -518,14 +518,16 @@ def toggle_modal(main_click, pie_click, line_click, close_click, main_fig, pie_f
     
     return is_open, {}
 
-# Download callback
+# Download callback for filtered data
 @app.callback(
     Output("download-dataframe-csv", "data"),
     Input("download-button", "n_clicks"),
     prevent_initial_call=True
 )
 def download_data(n_clicks):
-    if data_store.df is not None:
+    if data_store.filtered_df is not None:
+        return dcc.send_data_frame(data_store.filtered_df.to_csv, "filtered_dashboard_data.csv")
+    elif data_store.df is not None:
         return dcc.send_data_frame(data_store.df.to_csv, "dashboard_data.csv")
     return None
 
