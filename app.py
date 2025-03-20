@@ -4,7 +4,7 @@ import logging
 import dash
 from dash import dcc, html, Input, Output, State, callback
 import dash_bootstrap_components as dbc
-import dash_ag_grid as dag
+from dash import dash_table  # Correct import
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -12,8 +12,8 @@ import plotly.figure_factory as ff
 from datetime import datetime
 import chardet
 import numpy as np
-from sklearn.linear_model import LinearRegression
-from sklearn.cluster import KMeans
+# from sklearn.linear_model import LinearRegression
+# from sklearn.cluster import KMeans
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,7 +28,7 @@ app = dash.Dash(
     meta_tags=[
         {"name": "viewport", "content": "width=device-width, initial-scale=1"},
         {"name": "theme-color", "content": "#343a40"},
-        {"name": "apple-mobile-web-app-capable", "content": "yes"},
+        {"name": "mobile-web-app-capable", "content": "yes"},
         {"name": "apple-mobile-web-app-status-bar-style", "content": "black-translucent"},
     ],
 )
@@ -85,11 +85,6 @@ def parse_contents(contents, filename):
             logger.error("Failed to clean data")
             return None
         
-        # Sample the dataset to reduce load (100 rows for Render free tier)
-        if len(df) > 100:
-            df = df.sample(n=100, random_state=42)
-            logger.info(f"Dataset sampled to 100 rows: {df.shape}")
-        
         logger.info(f"File parsed successfully: {df.shape}")
         return df
     except Exception as e:
@@ -131,28 +126,9 @@ def generate_main_chart(df, selected_column, selected_y_axis, chart_type, dark_m
         elif chart_type == 'box':
             fig = px.box(df, x=selected_column, y=selected_y_axis, template=template)
         elif chart_type == 'cluster':
-            numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
-            if len(numerical_cols) >= 2:
-                kmeans = KMeans(n_clusters=3, n_init=10)
-                features = df[numerical_cols].dropna()
-                df.loc[features.index, 'cluster'] = kmeans.fit_predict(features)
-                fig = px.scatter(df, x=numerical_cols[0], y=numerical_cols[1], color='cluster', template=template)
-            else:
-                fig = px.scatter(title="Not enough numerical columns for clustering")
+            fig = px.scatter(title="Clustering not available (scikit-learn not installed)")
         elif chart_type == 'regression':
-            if (df[selected_column].dtype in ['int64', 'float64'] and 
-                df[selected_y_axis].dtype in ['int64', 'float64']):
-                X = df[[selected_column]].dropna()
-                y = df.loc[X.index, selected_y_axis]
-                model = LinearRegression()
-                model.fit(X, y)
-                df.loc[X.index, 'predicted'] = model.predict(X)
-                fig = px.scatter(df, x=selected_column, y=selected_y_axis, trendline="ols", template=template)
-                if selected_category:
-                    fig.update_traces(marker=dict(size=[15 if x == selected_category else 8 
-                                                     for x in df[selected_column]]))
-            else:
-                fig = px.scatter(title="Regression requires numerical X and Y axes")
+            fig = px.scatter(title="Regression not available (scikit-learn not installed)")
         else:
             fig = px.scatter(title="Unsupported chart type")
         return fig
@@ -259,43 +235,20 @@ main_content = dbc.Col([
     dbc.Card([
         dbc.CardBody([
             html.H5("Data Table", className="card-title text-light"),
-            html.Div(id='data-table-debug'),  # Debug output for rows and columns
-            dag.AgGrid(
+            html.Div(id='data-table-debug'),
+            html.Div(id='data-table-error', style={'color': 'red'}),
+            dash_table.DataTable(
                 id='data-table',
-                defaultColDef={
-                    "resizable": True,
-                    "sortable": True,
-                    "filter": True,
-                    "editable": False,
-                    "wrapText": True,
-                    "autoHeight": True,
-                    "minWidth": 100,
-                },
-                dashGridOptions={
-                    "pagination": True,
-                    "paginationPageSize": 10,
-                    "paginationPageSizeSelector": [10, 20, 50, 100],  # Ensure 10 is included
-                    "animateRows": True,
-                    "suppressRowClickSelection": True,
-                    "rowBuffer": 0,
-                    "enableCellTextSelection": True,
-                    "domLayout": "normal",
-                },
-                className="ag-theme-alpine-dark",
-                style={'height': '400px', 'width': '100%', 'overflow': 'auto', 'border': '1px solid #ccc'},
+                columns=[],
+                data=[],
+                style_table={'overflowX': 'auto', 'height': '400px'},
+                style_cell={'textAlign': 'left', 'backgroundColor': '#2e3b55', 'color': 'white'},
+                style_header={'backgroundColor': '#1f2a44', 'color': 'white', 'fontWeight': 'bold'},
+                style_data={'border': '1px solid #ffffff20'},
+                page_action='custom',  # Enable custom pagination
+                page_current=0,        # Start on the first page
+                page_size=10,          # Show 10 rows per page
             )
-            # Fallback: Uncomment the following to use dash_table.DataTable if AG Grid fails
-            # import dash_table
-            # dash_table.DataTable(
-            #     id='data-table',
-            #     columns=[{"name": i, "id": i} for i in df_filtered.columns] if 'df_filtered' in locals() else [],
-            #     data=df_filtered.to_dict('records') if 'df_filtered' in locals() else [],
-            #     style_table={'overflowX': 'auto'},
-            #     style_cell={'textAlign': 'left'},
-            #     style_header={'backgroundColor': 'rgb(30, 30, 30)', 'color': 'white'},
-            #     style_data={'backgroundColor': 'rgb(50, 50, 50)', 'color': 'white'},
-            #     page_size=10,
-            # )
         ])
     ], className="bg-card-dark border-0 shadow-sm"),
     dcc.Download(id="download-dataframe-csv"),
@@ -317,7 +270,7 @@ app.layout = dbc.Container([
     ], className="min-vh-100")
 ], fluid=True, className="bg-gradient-dark")
 
-# Main callback with chart highlighting and deselection
+# Main callback with chart highlighting, deselection, and pagination
 @app.callback(
     [Output('column-filter', 'options'),
      Output('value-filter', 'options'),
@@ -326,12 +279,13 @@ app.layout = dbc.Container([
      Output('pie-chart', 'figure'),
      Output('line-chart', 'figure'),
      Output('insights-panel', 'children'),
-     Output('data-table', 'rowData'),
-     Output('data-table', 'columnDefs'),
+     Output('data-table', 'data'),
+     Output('data-table', 'columns'),
      Output('upload-message', 'children'),
      Output('summary-stats', 'children'),
      Output('selected-category', 'data'),
-     Output('data-table-debug', 'children')],
+     Output('data-table-debug', 'children'),
+     Output('data-table-error', 'children')],
     [Input('upload-data', 'contents'),
      Input('column-filter', 'value'),
      Input('value-filter', 'value'),
@@ -339,10 +293,12 @@ app.layout = dbc.Container([
      Input('chart-type', 'value'),
      Input('dark-mode-toggle', 'value'),
      Input('main-chart', 'clickData'),
-     Input('clear-selection', 'n_clicks')],
+     Input('clear-selection', 'n_clicks'),
+     Input('data-table', 'page_current'),  # Add page_current input
+     Input('data-table', 'page_size')],    # Add page_size input
     [State('upload-data', 'filename')]
 )
-def update_dashboard(contents, selected_column, selected_values, selected_y_axis, chart_type, dark_mode, click_data, clear_clicks, filename):
+def update_dashboard(contents, selected_column, selected_values, selected_y_axis, chart_type, dark_mode, click_data, clear_clicks, page_current, page_size, filename):
     try:
         logger.info("update_dashboard callback triggered")
         logger.info(f"Contents: {contents is not None}, Filename: {filename}")
@@ -352,7 +308,7 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
 
         # Default outputs
         default_fig = px.scatter(title="Please upload a file")
-        default_outputs = [[] for _ in range(3)] + [default_fig] * 3 + [[] for _ in range(3)] + ["Please upload a file", "No data available", None, "No data"]
+        default_outputs = [[] for _ in range(3)] + [default_fig] * 3 + [[] for _ in range(3)] + ["Please upload a file", "No data available", None, "No data", ""]
 
         if not contents and data_store.df is None:
             logger.info("No contents and no stored data, returning default outputs")
@@ -364,7 +320,7 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
             if df is None:
                 logger.error("Failed to parse contents")
                 default_fig = px.scatter(title="Error loading file")
-                return [[] for _ in range(3)] + [default_fig] * 3 + [[] for _ in range(3)] + ["❌ Error loading file", "Error loading data", None, "Error"]
+                return [[] for _ in range(3)] + [default_fig] * 3 + [[] for _ in range(3)] + ["❌ Error loading file", "Error loading data", None, "Error", "Failed to load data table"]
             data_store.df = df
         else:
             logger.info("Using stored DataFrame")
@@ -373,7 +329,7 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         if df is None:
             logger.error("DataFrame is None")
             default_fig = px.scatter(title="No data available")
-            return [[] for _ in range(3)] + [default_fig] * 3 + [[] for _ in range(3)] + ["No data available", "No data available", None, "No data"]
+            return [[] for _ in range(3)] + [default_fig] * 3 + [[] for _ in range(3)] + ["No data available", "No data available", None, "No data", "No data available"]
 
         logger.info(f"DataFrame shape after loading: {df.shape}")
         logger.info(f"DataFrame columns: {df.columns.tolist()}")
@@ -435,39 +391,23 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
             ], className="list-unstyled")
 
         # Prepare data for the table
-        logger.info("Converting DataFrame to string for AG Grid")
+        logger.info("Converting DataFrame to string for DataTable")
         df_filtered = df_filtered.astype(str)
-        logger.info("Preparing row data")
-        row_data = df_filtered.to_dict('records')
-        logger.info(f"Row data prepared: {len(row_data)} rows")
+        logger.info("Preparing row data with pagination")
+        start_idx = page_current * page_size
+        end_idx = start_idx + page_size
+        row_data = df_filtered.iloc[start_idx:end_idx].to_dict('records')
+        logger.info(f"Paginated row data prepared: {len(row_data)} rows (page {page_current + 1})")
         logger.info(f"Sample row data: {row_data[:2] if row_data else 'Empty'}")
 
-        # Generate column definitions for AG Grid
+        # Generate column definitions for DataTable
         logger.info("Generating column definitions")
         if df_filtered.empty:
-            column_defs = [
-                {
-                    'field': 'message',
-                    'headerName': 'Message',
-                    'filter': 'agTextColumnFilter',
-                    'sortable': True,
-                    'resizable': True,
-                    'editable': False
-                }
-            ]
-            row_data = [{'message': 'No data available after filtering'}]
+            column_defs = [{"name": "Message", "id": "message"}]
+            row_data = [{"message": "No data available after filtering"}]
             logger.warning("DataFrame is empty, displaying placeholder message in table")
         else:
-            column_defs = [
-                {
-                    'field': col,
-                    'headerName': col.replace('_', ' ').title(),
-                    'filter': 'agTextColumnFilter',
-                    'sortable': True,
-                    'resizable': True,
-                    'editable': False
-                } for col in df_filtered.columns
-            ]
+            column_defs = [{"name": col.replace('_', ' ').title(), "id": col} for col in df_filtered.columns]
         logger.info(f"Column definitions generated: {column_defs}")
 
         # Debug output
@@ -487,12 +427,13 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
             f"✅ Uploaded {filename} ({len(df)} rows)" if contents else f"Data loaded ({len(df)} rows)",
             summary_stats,
             selected_category,
-            debug_info
+            debug_info,
+            ""
         )
     except Exception as e:
         logger.error(f"Dashboard update error: {str(e)}", exc_info=True)
         default_fig = px.scatter(title=f"Dashboard error: {str(e)}")
-        return [[] for _ in range(3)] + [default_fig] * 3 + [[] for _ in range(3)] + [f"❌ Error: {str(e)}", "Error loading data", None, "Error"]
+        return [[] for _ in range(3)] + [default_fig] * 3 + [[] for _ in range(3)] + [f"❌ Error: {str(e)}", "Error loading data", None, "Error", f"Failed to load data table: {str(e)}"]
 
 # Separate callback for "All Charts" tab to reduce load
 @app.callback(
