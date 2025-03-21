@@ -198,9 +198,9 @@ sidebar = dbc.Col([
                 accept=".csv,.xlsx"
             ),
             html.Div(id='upload-message', className="mb-3 text-center text-light"),
-            dcc.Dropdown(id='column-filter', placeholder="Select a column", className="mb-3 dropdown-blue"),
-            dcc.Dropdown(id='value-filter', placeholder="Select values", multi=True, className="mb-3 dropdown-green"),
-            dcc.Dropdown(id='y-axis-dropdown', placeholder="Select Y-axis", className="mb-3 dropdown-orange"),
+            dcc.Dropdown(id='column-filter', placeholder="Select a column", value='order_id', className="mb-3 dropdown-blue"),  # Added default value
+            dcc.Dropdown(id='value-filter', placeholder="Select values", value=[], multi=True, className="mb-3 dropdown-green"),  # Added default value
+            dcc.Dropdown(id='y-axis-dropdown', placeholder="Select Y-axis", value='store_id', className="mb-3 dropdown-orange"),  # Added default value
             dcc.Dropdown(id='chart-type', options=[
                 {'label': 'Bar Chart', 'value': 'bar'},
                 {'label': 'Pie Chart', 'value': 'pie'},
@@ -236,6 +236,11 @@ main_content = dbc.Col([
                     dcc.Graph(id='line-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
                 ]),
                 dbc.Tab(label="All Charts", tab_id="all-tab", children=[
+                    html.Button("Download All Charts 📥", id="download-all-charts", className="btn btn-outline-cyan btn-block mb-3"),  # Added button
+                    dcc.Download(id="download-main-chart"),  # Added download component for main chart
+                    dcc.Download(id="download-pie-chart"),   # Added download component for pie chart
+                    dcc.Download(id="download-line-chart"),  # Added download component for line chart
+                    dcc.Store(id='download-trigger', data=0),  # Store to trigger sequential downloads
                     dbc.Row([
                         dbc.Col(dcc.Graph(id='main-chart-all', style={'height': '300px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']}), width=4),
                         dbc.Col(dcc.Graph(id='pie-chart-all', style={'height': '300px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']}), width=4),
@@ -475,16 +480,54 @@ def update_all_charts_tab(active_tab, selected_column, selected_values, selected
             return [px.scatter(title="No data available")] * 3
 
         df = data_store.df
+        # Handle empty selected_values by using the full dataframe
         df_filtered = df[df[selected_column].isin(selected_values)] if selected_column and selected_values else df.copy()
 
-        main_fig_all = generate_main_chart(df, selected_column, selected_y_axis, chart_type, dark_mode, None)
-        pie_fig_all = generate_pie_chart(df, selected_column, selected_y_axis, dark_mode, None)
-        line_fig_all = generate_line_chart(df, selected_column, selected_y_axis, dark_mode, None)
+        main_fig_all = generate_main_chart(df_filtered, selected_column, selected_y_axis, chart_type, dark_mode, None)
+        pie_fig_all = generate_pie_chart(df_filtered, selected_column, selected_y_axis, dark_mode, None)
+        line_fig_all = generate_line_chart(df_filtered, selected_column, selected_y_axis, dark_mode, None)
 
         return main_fig_all, pie_fig_all, line_fig_all
     except Exception as e:
         logger.error(f"All charts update error: {str(e)}")
         return [px.scatter(title=f"Error: {str(e)}")] * 3
+
+# Callback to handle "Download All Charts" button
+@app.callback(
+    [Output('download-trigger', 'data'),
+     Output('download-main-chart', 'data'),
+     Output('download-pie-chart', 'data'),
+     Output('download-line-chart', 'data')],
+    [Input('download-all-charts', 'n_clicks'),
+     Input('download-trigger', 'data')],
+    [State('main-chart-all', 'figure'),
+     State('pie-chart-all', 'figure'),
+     State('line-chart-all', 'figure')]
+)
+def download_all_charts(n_clicks, trigger, main_fig, pie_fig, line_fig):
+    if not n_clicks:
+        return 0, None, None, None
+
+    ctx = dash.callback_context
+    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
+
+    if triggered_id == 'download-all-charts':
+        # Start the download sequence by setting the trigger to 1
+        return 1, None, None, None
+
+    # Sequential download logic using the trigger
+    if triggered_id == 'download-trigger':
+        if trigger == 1:
+            # Download main chart
+            return 2, dict(content=px.scatter() if not main_fig else main_fig, filename="main_chart.png", type="image/png"), None, None
+        elif trigger == 2:
+            # Download pie chart
+            return 3, None, dict(content=px.scatter() if not pie_fig else pie_fig, filename="pie_chart.png", type="image/png"), None
+        elif trigger == 3:
+            # Download line chart
+            return 0, None, None, dict(content=px.scatter() if not line_fig else line_fig, filename="line_chart.png", type="image/png")
+
+    return 0, None, None, None
 
 # Modal callback for enlarged chart
 @app.callback(
