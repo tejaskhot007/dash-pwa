@@ -14,6 +14,7 @@ import chardet
 import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.cluster import KMeans
+import zipfile  # For ZIP file creation
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -198,9 +199,9 @@ sidebar = dbc.Col([
                 accept=".csv,.xlsx"
             ),
             html.Div(id='upload-message', className="mb-3 text-center text-light"),
-            dcc.Dropdown(id='column-filter', placeholder="Select a column", value='order_id', className="mb-3 dropdown-blue"),  # Added default value
-            dcc.Dropdown(id='value-filter', placeholder="Select values", value=[], multi=True, className="mb-3 dropdown-green"),  # Added default value
-            dcc.Dropdown(id='y-axis-dropdown', placeholder="Select Y-axis", value='store_id', className="mb-3 dropdown-orange"),  # Added default value
+            dcc.Dropdown(id='column-filter', placeholder="Select a column", value='order_id', className="mb-3 dropdown-blue"),
+            dcc.Dropdown(id='value-filter', placeholder="Select values", value=[], multi=True, className="mb-3 dropdown-green"),
+            dcc.Dropdown(id='y-axis-dropdown', placeholder="Select Y-axis", value='store_id', className="mb-3 dropdown-orange"),
             dcc.Dropdown(id='chart-type', options=[
                 {'label': 'Bar Chart', 'value': 'bar'},
                 {'label': 'Pie Chart', 'value': 'pie'},
@@ -236,11 +237,8 @@ main_content = dbc.Col([
                     dcc.Graph(id='line-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
                 ]),
                 dbc.Tab(label="All Charts", tab_id="all-tab", children=[
-                    html.Button("Download All Charts 📥", id="download-all-charts", className="btn btn-outline-cyan btn-block mb-3"),  # Added button
-                    dcc.Download(id="download-main-chart"),  # Added download component for main chart
-                    dcc.Download(id="download-pie-chart"),   # Added download component for pie chart
-                    dcc.Download(id="download-line-chart"),  # Added download component for line chart
-                    dcc.Store(id='download-trigger', data=0),  # Store to trigger sequential downloads
+                    html.Button("Download All Charts 📥", id="download-all-charts", className="btn btn-outline-cyan btn-block mb-3"),
+                    dcc.Download(id="download-all-charts-zip"),  # Download component for ZIP file
                     dbc.Row([
                         dbc.Col(dcc.Graph(id='main-chart-all', style={'height': '300px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']}), width=4),
                         dbc.Col(dcc.Graph(id='pie-chart-all', style={'height': '300px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']}), width=4),
@@ -492,42 +490,50 @@ def update_all_charts_tab(active_tab, selected_column, selected_values, selected
         logger.error(f"All charts update error: {str(e)}")
         return [px.scatter(title=f"Error: {str(e)}")] * 3
 
-# Callback to handle "Download All Charts" button
+# Callback to handle "Download All Charts" button as a ZIP file
 @app.callback(
-    [Output('download-trigger', 'data'),
-     Output('download-main-chart', 'data'),
-     Output('download-pie-chart', 'data'),
-     Output('download-line-chart', 'data')],
-    [Input('download-all-charts', 'n_clicks'),
-     Input('download-trigger', 'data')],
-    [State('main-chart-all', 'figure'),
-     State('pie-chart-all', 'figure'),
-     State('line-chart-all', 'figure')]
+    Output("download-all-charts-zip", "data"),
+    Input("download-all-charts", "n_clicks"),
+    State('main-chart-all', 'figure'),
+    State('pie-chart-all', 'figure'),
+    State('line-chart-all', 'figure'),
+    prevent_initial_call=True
 )
-def download_all_charts(n_clicks, trigger, main_fig, pie_fig, line_fig):
+def download_all_charts(n_clicks, main_fig, pie_fig, line_fig):
     if not n_clicks:
-        return 0, None, None, None
+        return None
 
-    ctx = dash.callback_context
-    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    # Check if figures are available
+    if not main_fig or not pie_fig or not line_fig:
+        logger.error("One or more charts are not available for download")
+        return None
 
-    if triggered_id == 'download-all-charts':
-        # Start the download sequence by setting the trigger to 1
-        return 1, None, None, None
+    try:
+        # Create an in-memory ZIP file
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # Convert each figure to PNG and add to the ZIP
+            for fig, name in [(main_fig, 'main_chart.png'), (pie_fig, 'pie_chart.png'), (line_fig, 'line_chart.png')]:
+                if fig:  # Ensure the figure exists
+                    fig_obj = go.Figure(fig)
+                    # Use io.BytesIO to write the image in memory
+                    img_buffer = io.BytesIO()
+                    fig_obj.write_image(img_buffer, format='png', engine="kaleido", width=800, height=600)
+                    img_buffer.seek(0)
+                    # Add the image bytes to the ZIP file
+                    zip_file.writestr(name, img_buffer.getvalue())
 
-    # Sequential download logic using the trigger
-    if triggered_id == 'download-trigger':
-        if trigger == 1:
-            # Download main chart
-            return 2, dict(content=px.scatter() if not main_fig else main_fig, filename="main_chart.png", type="image/png"), None, None
-        elif trigger == 2:
-            # Download pie chart
-            return 3, None, dict(content=px.scatter() if not pie_fig else pie_fig, filename="pie_chart.png", type="image/png"), None
-        elif trigger == 3:
-            # Download line chart
-            return 0, None, None, dict(content=px.scatter() if not line_fig else line_fig, filename="line_chart.png", type="image/png")
-
-    return 0, None, None, None
+        zip_buffer.seek(0)
+        # Return the ZIP file as a base64-encoded string for download
+        return dict(
+            content=base64.b64encode(zip_buffer.getvalue()).decode(),
+            filename="all_charts.zip",
+            type="application/zip",
+            base64=True
+        )
+    except Exception as e:
+        logger.error(f"Error creating ZIP file: {str(e)}")
+        return None
 
 # Modal callback for enlarged chart
 @app.callback(
