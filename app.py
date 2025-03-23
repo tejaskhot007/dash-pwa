@@ -14,7 +14,7 @@ import chardet
 import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.cluster import KMeans
-from sklearn.ensemble import IsolationForest, RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor
 from prophet import Prophet
 import zipfile
 
@@ -48,7 +48,7 @@ class DataStore:
 
 data_store = DataStore()
 
-# Data cleaning function (unchanged)
+# Data cleaning function
 def clean_data(df):
     try:
         # Store the raw DataFrame before cleaning
@@ -347,20 +347,6 @@ def generate_clustering_report(df):
         ], className="text-light"))
     return report
 
-def detect_anomalies(df, column):
-    if column not in df.columns or df[column].dtype not in ['int64', 'float64']:
-        return [], "Select a numerical column for anomaly detection"
-    data = df[[column]].dropna()
-    if len(data) < 2:
-        return [], "Not enough data for anomaly detection"
-    model = IsolationForest(contamination=0.1, random_state=42)
-    data['anomaly'] = model.fit_predict(data)
-    anomalies = data[data['anomaly'] == -1][column]
-    if anomalies.empty:
-        return [], "No anomalies detected"
-    anomaly_options = [{"label": f"Row {idx}: {val}", "value": f"Row {idx}: {val}"} for idx, val in anomalies.items()]
-    return anomaly_options, None
-
 def generate_feature_importance(df, target_column, dark_mode):
     if target_column not in df.columns or df[target_column].dtype not in ['int64', 'float64']:
         return px.scatter(title="Select a numerical target column for feature importance")
@@ -377,7 +363,7 @@ def generate_feature_importance(df, target_column, dark_mode):
     fig.update_layout(title=f"Feature Importance for {target_column}", xaxis_title="Importance", yaxis_title="Feature")
     return fig
 
-# Sidebar content (Updated with dropdown for Anomaly Detection)
+# Sidebar content (Removed Anomaly Detection)
 sidebar = dbc.Col([
     dbc.Card([
         dbc.CardBody([
@@ -419,8 +405,6 @@ sidebar = dbc.Col([
             html.Div(id='summary-stats'),
             html.H5("Outlier Detection", className="card-title text-light mt-3"),
             dcc.Dropdown(id='outlier-detection', placeholder="Select an outlier", options=[], className="mb-3 dropdown-purple"),
-            html.H5("Anomaly Detection", className="card-title text-light mt-3"),
-            dcc.Dropdown(id='anomaly-detection', placeholder="Select an anomaly", options=[], className="mb-3 dropdown-purple"),
             html.H5("Clustering Report", className="card-title text-light mt-3"),
             html.Div(id='clustering-report')
         ])
@@ -505,7 +489,7 @@ app.layout = dbc.Container([
     ], className="min-vh-100")
 ], fluid=True, className="bg-gradient-dark")
 
-# Main callback (Updated with dropdown for Anomaly Detection)
+# Main callback (Updated to remove Anomaly Detection)
 @app.callback(
     [Output('column-filter', 'options'),
      Output('value-filter', 'options'),
@@ -531,8 +515,6 @@ app.layout = dbc.Container([
      Output('row-comparison', 'children'),
      Output('outlier-detection', 'options'),
      Output('outlier-detection', 'placeholder'),
-     Output('anomaly-detection', 'options'),  # Updated: Now outputs dropdown options
-     Output('anomaly-detection', 'placeholder'),  # New: To show message if no anomalies
      Output('clustering-report', 'children')],
     [Input('upload-data', 'contents'),
      Input('column-filter', 'value'),
@@ -558,9 +540,9 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         ctx = dash.callback_context
         triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
 
-        # Default outputs
+        # Default outputs (Updated to remove Anomaly Detection outputs)
         default_fig = px.scatter(title="Please upload a file")
-        default_outputs = [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + ["Please upload a file", "No data available", None, "No data", "", "No cleaning performed", "", [], "No outliers detected", [], "No anomalies detected", "No clustering performed"]
+        default_outputs = [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + ["Please upload a file", "No data available", None, "No data", "", "No cleaning performed", "", [], "No outliers detected", "No clustering performed"]
 
         if not contents and data_store.df is None:
             logger.info("No contents and no stored data, returning default outputs")
@@ -573,7 +555,7 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
                 if df is None:
                     logger.error("Failed to parse contents")
                     default_fig = px.scatter(title="Error loading file")
-                    return [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + ["❌ Error loading file", "Error loading data", None, "Error", "Failed to load data table", html.Ul([html.Li(msg) for msg in cleaning_messages]), "", [], "Error loading data", [], "Error loading data", "Error loading data"]
+                    return [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + ["❌ Error loading file", "Error loading data", None, "Error", "Failed to load data table", html.Ul([html.Li(msg) for msg in cleaning_messages]), "", [], "Error loading data", "Error loading data"]
                 data_store.df = df
             else:
                 logger.error("No contents provided for new upload")
@@ -586,7 +568,7 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         if df is None:
             logger.error("DataFrame is None")
             default_fig = px.scatter(title="No data available")
-            return [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + ["No data available", "No data available", None, "No data", "No data available", html.Ul([html.Li(msg) for msg in cleaning_messages]), "", [], "No data available", [], "No data available", "No data available"]
+            return [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + ["No data available", "No data available", None, "No data", "No data available", html.Ul([html.Li(msg) for msg in cleaning_messages]), "", [], "No data available", "No data available"]
 
         logger.info(f"DataFrame shape after loading: {df.shape}")
         logger.info(f"DataFrame columns: {df.columns.tolist()}")
@@ -677,9 +659,6 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         logger.info("Detecting outliers")
         outlier_options, outlier_message = detect_outliers(df_filtered, selected_y_axis)
 
-        logger.info("Detecting anomalies")
-        anomaly_options, anomaly_message = detect_anomalies(df_filtered, selected_y_axis)
-
         logger.info("Generating clustering report")
         clustering_report = generate_clustering_report(df_filtered) if chart_type == 'cluster' else "Select 'Clustering' chart type to view report"
 
@@ -729,14 +708,12 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
             row_comparison_message,
             outlier_options,
             outlier_message if outlier_message else "Select an outlier",
-            anomaly_options,
-            anomaly_message if anomaly_message else "Select an anomaly",
             clustering_report
         )
     except Exception as e:
         logger.error(f"Dashboard update error: {str(e)}", exc_info=True)
         default_fig = px.scatter(title=f"Dashboard error: {str(e)}")
-        return [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + [f"❌ Error: {str(e)}", "Error loading data", None, "Error", f"Failed to load data table: {str(e)}", "Error during update", "", [], "Error loading data", [], "Error loading data", "Error loading data"]
+        return [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + [f"❌ Error: {str(e)}", "Error loading data", None, "Error", f"Failed to load data table: {str(e)}", "Error during update", "", [], "Error loading data", "Error loading data"]
 
 # Separate callback for "All Charts" tab
 @app.callback(
@@ -968,4 +945,4 @@ app.index_string = '''
 '''
 
 if __name__ == '__main__':
-    app.run_server(debug=True, port=8050)
+    app.run_server(host='0.0.0.0', port=8050)
