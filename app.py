@@ -143,7 +143,7 @@ def clean_data(df):
         logger.error(f"Data cleaning error: {e}")
         return None, [f"Error during cleaning: {str(e)}"]
 
-# File parsing function
+# File parsing function (Improved error handling)
 def parse_contents(contents, filename):
     try:
         logger.info(f"Parsing file: {filename}")
@@ -152,11 +152,16 @@ def parse_contents(contents, filename):
         encoding = chardet.detect(decoded)['encoding'] or 'utf-8'
         logger.info(f"Detected encoding: {encoding}")
         if filename.endswith('.csv'):
-            df = pd.read_csv(io.StringIO(decoded.decode(encoding)), low_memory=False, engine='c')
+            # Limit the number of rows to reduce memory usage
+            df = pd.read_csv(io.StringIO(decoded.decode(encoding)), low_memory=False, engine='c', nrows=1000)
         elif filename.endswith('.xlsx'):
             df = pd.read_excel(io.BytesIO(decoded), engine='openpyxl')
         else:
             raise ValueError("Unsupported file format")
+        
+        if df.empty:
+            logger.error("Uploaded file is empty")
+            return None, ["Uploaded file is empty"]
         
         df, cleaning_messages = clean_data(df)
         if df is None:
@@ -165,6 +170,12 @@ def parse_contents(contents, filename):
         
         logger.info(f"File parsed successfully: {df.shape}")
         return df, cleaning_messages
+    except UnicodeDecodeError as e:
+        logger.error(f"UnicodeDecodeError: {e}")
+        return None, [f"Error decoding file: {str(e)}. Try saving the file with UTF-8 encoding."]
+    except pd.errors.ParserError as e:
+        logger.error(f"ParserError: {e}")
+        return None, [f"Error parsing CSV file: {str(e)}. Check the file format."]
     except Exception as e:
         logger.error(f"File parsing error: {e}")
         return None, [f"Error parsing file: {str(e)}"]
@@ -174,6 +185,10 @@ def generate_main_chart(df, selected_column, selected_y_axis, chart_type, dark_m
     try:
         if not selected_column or not selected_y_axis:
             return px.scatter(title="Please select X and Y axes")
+        
+        # Sample the dataset to reduce memory usage
+        if len(df) > 1000:
+            df = df.sample(1000, random_state=42)
         
         template = 'plotly_dark' if dark_mode else 'plotly'
         if chart_type == 'bar':
@@ -237,6 +252,9 @@ def generate_pie_chart(df, selected_column, selected_y_axis, dark_mode, selected
     try:
         if not selected_column or not selected_y_axis:
             return px.scatter(title="No pie chart generated")
+        # Sample the dataset to reduce memory usage
+        if len(df) > 1000:
+            df = df.sample(1000, random_state=42)
         fig = px.pie(df, names=selected_column, values=selected_y_axis, 
                     template='plotly_dark' if dark_mode else 'plotly',
                     title=f"Pie: {selected_column} Distribution")
@@ -253,6 +271,9 @@ def generate_line_chart(df, selected_column, selected_y_axis, dark_mode, selecte
     try:
         if not selected_column or not selected_y_axis:
             return px.scatter(title="No line chart generated")
+        # Sample the dataset to reduce memory usage
+        if len(df) > 1000:
+            df = df.sample(1000, random_state=42)
         fig = px.line(df, x=selected_column, y=selected_y_axis,
                      template='plotly_dark' if dark_mode else 'plotly',
                      title=f"Line: {selected_column} vs {selected_y_axis}")
@@ -269,6 +290,9 @@ def generate_correlation_heatmap(df, dark_mode):
     numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
     if len(numerical_cols) < 2:
         return px.scatter(title="Not enough numerical columns for correlation analysis")
+    # Sample the dataset to reduce memory usage
+    if len(df) > 1000:
+        df = df.sample(1000, random_state=42)
     corr_matrix = df[numerical_cols].corr()
     fig = ff.create_annotated_heatmap(
         z=corr_matrix.values,
@@ -301,21 +325,32 @@ def generate_trend_chart(df, date_column, y_axis, dark_mode):
     if not date_column or not y_axis or date_column not in df.columns or y_axis not in df.columns:
         return px.scatter(title="Select a date column and Y-axis for trend analysis")
     df[date_column] = pd.to_datetime(df[date_column], errors='coerce')
+    # Sample the dataset to reduce memory usage
+    if len(df) > 1000:
+        df = df.sample(1000, random_state=42)
     trend_data = df.groupby(date_column)[y_axis].sum().reset_index()
     fig = px.line(trend_data, x=date_column, y=y_axis, template='plotly_dark' if dark_mode else 'plotly')
     fig.update_layout(title=f"Trend of {y_axis} Over Time")
     return fig
 
-# Data Science Functions
-def generate_forecast(df, date_column, y_axis, periods=30, dark_mode=True):
+# Data Science Functions (Optimized for memory usage)
+def generate_forecast(df, date_column, y_axis, periods=15, dark_mode=True):
     if not date_column or not y_axis or date_column not in df.columns or y_axis not in df.columns:
         return px.scatter(title="Select a date column and Y-axis for forecasting")
     df[date_column] = pd.to_datetime(df[date_column], errors='coerce')
+    # Sample the dataset to reduce memory usage
+    if len(df) > 1000:
+        df = df.sample(1000, random_state=42)
     forecast_data = df[[date_column, y_axis]].rename(columns={date_column: 'ds', y_axis: 'y'})
     forecast_data = forecast_data.dropna()
     if len(forecast_data) < 2:
         return px.scatter(title="Not enough data for forecasting")
-    model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=True)
+    # Adjust seasonality based on dataset size
+    model = Prophet(
+        yearly_seasonality=len(forecast_data) > 365,
+        weekly_seasonality=len(forecast_data) > 90,
+        daily_seasonality=len(forecast_data) > 30
+    )
     model.fit(forecast_data)
     future = model.make_future_dataframe(periods=periods)
     forecast = model.predict(future)
@@ -334,6 +369,9 @@ def generate_clustering_report(df):
     numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
     if len(numerical_cols) < 2:
         return "Not enough numerical columns for clustering report"
+    # Sample the dataset to reduce memory usage
+    if len(df) > 1000:
+        df = df.sample(1000, random_state=42)
     kmeans = KMeans(n_clusters=3, n_init=10)
     features = df[numerical_cols].dropna()
     df.loc[features.index, 'cluster'] = kmeans.fit_predict(features)
@@ -354,16 +392,20 @@ def generate_feature_importance(df, target_column, dark_mode):
     features = [col for col in features if col != target_column]
     if not features:
         return px.scatter(title="Not enough numerical features for analysis")
+    # Sample the dataset to reduce memory usage
+    if len(df) > 1000:
+        df = df.sample(1000, random_state=42)
     X = df[features].fillna(0)
     y = df[target_column].fillna(0)
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    # Reduce the number of trees to lower memory usage
+    model = RandomForestRegressor(n_estimators=10, random_state=42)
     model.fit(X, y)
     importances = model.feature_importances_
     fig = px.bar(x=importances, y=features, orientation='h', template='plotly_dark' if dark_mode else 'plotly')
     fig.update_layout(title=f"Feature Importance for {target_column}", xaxis_title="Importance", yaxis_title="Feature")
     return fig
 
-# Sidebar content (Removed Anomaly Detection)
+# Sidebar content
 sidebar = dbc.Col([
     dbc.Card([
         dbc.CardBody([
@@ -411,7 +453,7 @@ sidebar = dbc.Col([
     ], className="bg-card-dark border-0 shadow-sm")
 ], width=3, className="sidebar collapse show", id="sidebar")
 
-# Main content
+# Main content (Added loading spinners)
 main_content = dbc.Col([
     dbc.NavbarSimple(brand="📊 Advanced Data Analysis Dashboard", color="dark", dark=True, className="mb-4 navbar-dark"),
     html.Div(id='row-comparison', className="mb-3 text-center text-light"),
@@ -419,25 +461,53 @@ main_content = dbc.Col([
         dbc.CardBody([
             dbc.Tabs([
                 dbc.Tab(label="Main Chart", tab_id="main-tab", children=[
-                    dcc.Graph(id='main-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
+                    dcc.Loading(
+                        id="loading-main-chart",
+                        type="default",
+                        children=dcc.Graph(id='main-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
+                    )
                 ]),
                 dbc.Tab(label="Pie Chart", tab_id="pie-tab", children=[
-                    dcc.Graph(id='pie-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
+                    dcc.Loading(
+                        id="loading-pie-chart",
+                        type="default",
+                        children=dcc.Graph(id='pie-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
+                    )
                 ]),
                 dbc.Tab(label="Line Chart", tab_id="line-tab", children=[
-                    dcc.Graph(id='line-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
+                    dcc.Loading(
+                        id="loading-line-chart",
+                        type="default",
+                        children=dcc.Graph(id='line-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
+                    )
                 ]),
                 dbc.Tab(label="Correlation", tab_id="correlation-tab", children=[
-                    dcc.Graph(id='correlation-heatmap', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
+                    dcc.Loading(
+                        id="loading-correlation-heatmap",
+                        type="default",
+                        children=dcc.Graph(id='correlation-heatmap', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
+                    )
                 ]),
                 dbc.Tab(label="Trends", tab_id="trends-tab", children=[
-                    dcc.Graph(id='trend-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
+                    dcc.Loading(
+                        id="loading-trend-chart",
+                        type="default",
+                        children=dcc.Graph(id='trend-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
+                    )
                 ]),
                 dbc.Tab(label="Forecast", tab_id="forecast-tab", children=[
-                    dcc.Graph(id='forecast-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
+                    dcc.Loading(
+                        id="loading-forecast-chart",
+                        type="default",
+                        children=dcc.Graph(id='forecast-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
+                    )
                 ]),
                 dbc.Tab(label="Feature Importance", tab_id="feature-importance-tab", children=[
-                    dcc.Graph(id='feature-importance-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
+                    dcc.Loading(
+                        id="loading-feature-importance-chart",
+                        type="default",
+                        children=dcc.Graph(id='feature-importance-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']})
+                    )
                 ]),
                 dbc.Tab(label="All Charts", tab_id="all-tab", children=[
                     html.Button("Download All Charts 📥", id="download-all-charts", className="btn btn-outline-cyan btn-block mb-3"),
@@ -489,7 +559,7 @@ app.layout = dbc.Container([
     ], className="min-vh-100")
 ], fluid=True, className="bg-gradient-dark")
 
-# Main callback (Updated to remove Anomaly Detection)
+# Main callback (Updated to preserve data_store.df)
 @app.callback(
     [Output('column-filter', 'options'),
      Output('value-filter', 'options'),
@@ -540,7 +610,7 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         ctx = dash.callback_context
         triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
 
-        # Default outputs (Updated to remove Anomaly Detection outputs)
+        # Default outputs
         default_fig = px.scatter(title="Please upload a file")
         default_outputs = [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + ["Please upload a file", "No data available", None, "No data", "", "No cleaning performed", "", [], "No outliers detected", "No clustering performed"]
 
@@ -552,11 +622,12 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
             if contents:
                 logger.info("Processing new upload")
                 df, cleaning_messages = parse_contents(contents, filename)
-                if df is None:
+                if df is not None:
+                    data_store.df = df
+                else:
                     logger.error("Failed to parse contents")
                     default_fig = px.scatter(title="Error loading file")
                     return [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + ["❌ Error loading file", "Error loading data", None, "Error", "Failed to load data table", html.Ul([html.Li(msg) for msg in cleaning_messages]), "", [], "Error loading data", "Error loading data"]
-                data_store.df = df
             else:
                 logger.error("No contents provided for new upload")
                 return default_outputs
@@ -635,7 +706,7 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         logger.info("Generating trend chart")
         trend_fig = generate_trend_chart(df_filtered, date_column, selected_y_axis, dark_mode)
         logger.info("Generating forecast chart")
-        forecast_fig = generate_forecast(df_filtered, date_column, selected_y_axis, periods=30, dark_mode=dark_mode)
+        forecast_fig = generate_forecast(df_filtered, date_column, selected_y_axis, periods=15, dark_mode=dark_mode)
         logger.info("Generating feature importance chart")
         feature_importance_fig = generate_feature_importance(df_filtered, target_column, dark_mode)
 
