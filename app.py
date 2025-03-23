@@ -17,6 +17,7 @@ from sklearn.cluster import KMeans
 from sklearn.ensemble import RandomForestRegressor
 from prophet import Prophet
 import zipfile
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -48,102 +49,110 @@ class DataStore:
 
 data_store = DataStore()
 
-# Data cleaning function
-def clean_data(df):
+# Updated data cleaning and validation function with simplified output
+def clean_and_validate_data(df):
     try:
-        # Store the raw DataFrame before cleaning
+        # Step 1: Store the raw DataFrame before any modifications
         if data_store.raw_df is None:
             data_store.raw_df = df.copy()
             data_store.original_row_count = len(df)  # Store the original row count
 
-        # Initialize variables to track cleaning stats
-        rows_dropped_nan = 0
-        rows_dropped_blank = 0
-        duplicates_removed = 0
-        columns_dropped = 0
+        # Initialize messages for the dashboard (simplified output)
+        simplified_messages = []
 
-        # Step 1: Drop unnecessary columns
-        columns_to_drop = ["column3", "promo_type_1", "promo_bin_1", "promo_type_2", "promo_bin_2", "promo_discount_2"]
-        existing_columns = [col for col in columns_to_drop if col in df.columns]
-        df.drop(columns=existing_columns, inplace=True)
-        columns_dropped = len(existing_columns)
+        # Step 2: Identifying Issues (only collect data for simplified output)
+        # 2.1. Missing Values
+        total_nan = df.isna().sum().sum()
+        simplified_messages.append(f"Total NaN values: {total_nan}")
 
-        # Step 2: Drop blank rows (all values are empty or whitespace)
+        # 2.2. Duplicates
+        # Duplicate Rows
+        duplicate_rows = len(df) - len(df.drop_duplicates())
+        # Duplicate Columns
+        duplicate_columns = df.T.duplicated().sum()
+        duplicate_column_names = df.columns[df.T.duplicated()].tolist()
+        simplified_messages.append(f"Duplicate rows: {duplicate_rows}")
+        simplified_messages.append(f"Duplicate columns: {duplicate_columns}")
+        if duplicate_columns > 0:
+            simplified_messages.append(f"Duplicate columns list: {', '.join(duplicate_column_names)}")
+
+        # Step 3: Cleaning and Transforming Data
         initial_rows = len(df)
-        blank_rows = df.apply(lambda row: all(pd.isna(val) or str(val).strip() == "" for val in row), axis=1)
-        df = df[~blank_rows]
-        rows_dropped_blank = initial_rows - len(df)
-        logger.info(f"Dropped {rows_dropped_blank} blank rows")
+        initial_cols = len(df.columns)
 
-        # Step 3: Drop rows with missing values (NaN)
+        # 3.1. Standardization
+        # Standardize date formats (specify format to avoid warning)
+        for col in df.columns:
+            if 'date' in col.lower():
+                df[col] = pd.to_datetime(df[col], format='%Y-%m-%d', errors='coerce')
+
+        # Standardize text columns (lowercase, strip whitespace)
+        for col in df.select_dtypes(include=['object']).columns:
+            df[col] = df[col].str.lower().str.strip()
+
+        # Convert 'price' and 'sales' to numeric, coercing errors to NaN
+        if 'price' in df.columns:
+            df['price'] = pd.to_numeric(df['price'], errors='coerce')
+        if 'sales' in df.columns:
+            df['sales'] = pd.to_numeric(df['sales'], errors='coerce')
+
+        # 3.2. Data Transformation
+        # Drop columns that are entirely NaN to avoid RuntimeWarning
+        df = df.dropna(how='all', axis=1)
+
+        # Handle missing values: Impute numeric with median, categorical with mode
+        rows_with_na = df[df.isna().any(axis=1)]
+        rows_dropped_na = 0  # Track rows dropped due to NaN (if any)
+
+        # Drop rows where all values are NaN
+        initial_rows_na = len(df)
+        df = df.dropna(how='all')
+        rows_dropped_na += initial_rows_na - len(df)
+
+        # Impute remaining missing values
+        for col in df.columns:
+            if df[col].isna().sum() > 0:
+                if df[col].dtype in ['int64', 'float64']:
+                    median_value = df[col].median()
+                    df[col] = df[col].fillna(median_value)
+                else:
+                    mode_value = df[col].mode()[0]
+                    df[col] = df[col].fillna(mode_value)
+
+        simplified_messages.append(f"Rows dropped due to NaN: {rows_dropped_na}")
+
+        # 3.3. Data Integration
+        # Not applicable (single dataset)
+
+        # 3.4. Data Reduction
+        # Remove duplicate rows
         initial_rows = len(df)
-        df.dropna(inplace=True)
-        rows_dropped_nan += initial_rows - len(df)
-        logger.info(f"Dropped {rows_dropped_nan} rows with missing values")
+        df = df.drop_duplicates(keep='first')
 
-        # Step 4: Remove duplicates based on "order_id (unique)"
-        if "order_id (unique)" in df.columns:
-            initial_rows = len(df)
-            df.drop_duplicates(subset="order_id (unique)", keep="first", inplace=True)
-            duplicates_removed = initial_rows - len(df)
-            logger.info(f"Removed duplicates: {duplicates_removed} rows removed")
-        else:
-            logger.info("Column 'order_id (unique)' not found, skipping duplicate removal")
+        # Remove duplicate columns
+        duplicate_columns_to_drop = df.columns[df.T.duplicated()]
+        df = df.drop(columns=duplicate_columns_to_drop)
 
-        # Step 5: Filter rows to remove NaN in specific columns
-        if "order_id (unique)" in df.columns and "price" in df.columns:
-            initial_rows = len(df)
-            filter_data = df[df["order_id (unique)"].notna() & df["price"].notna()]
-            rows_dropped_nan += initial_rows - len(filter_data)
-            df = filter_data
-        else:
-            logger.info("Columns 'order_id (unique)' or 'price' not found, skipping NaN filtering")
+        # Remove columns with >90% missing values (before imputation)
+        missing_threshold = 0.9
+        columns_with_high_missing = data_store.raw_df.columns[data_store.raw_df.isna().mean() > missing_threshold]
+        df = df.drop(columns=columns_with_high_missing, errors='ignore')
 
-        # Step 6: Extract numbers from the "sales" column (handle <number> sales format)
-        if "sales" in df.columns:
-            if df["sales"].dtype != "object":
-                df["sales"] = df["sales"].astype(str)
-            df["sales"] = df["sales"].str.extract(r"(\d+)")
-        else:
-            logger.info("Column 'sales' not found, skipping number extraction")
+        # Step 4: Validation and Verification (not included in simplified output)
+        # 4.1. Data Validation
+        remaining_nan = df.isna().sum().sum()
+        remaining_duplicate_rows = len(df) - len(df.drop_duplicates())
+        remaining_duplicate_columns = df.T.duplicated().sum()
 
-        # Step 7: Convert "sales" and "revenue" columns to numeric types
-        if "sales" in df.columns:
-            df["sales"] = pd.to_numeric(df["sales"], errors="coerce")
-        else:
-            logger.info("Column 'sales' not found, skipping numeric conversion")
+        # 4.2. Data Verification
+        # Verification is performed but not reported in the simplified output
 
-        if "revenue" in df.columns:
-            df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce")
-        else:
-            logger.info("Column 'revenue' not found, skipping numeric conversion")
-
-        # Step 8: Convert "order_date_2" to datetime
-        if "order_date_2" in df.columns:
-            df["order_date_2"] = pd.to_datetime(df["order_date_2"], errors="coerce")
-        else:
-            logger.info("Column 'order_date_2' not found, skipping datetime conversion")
-
-        # Compile cleaning messages
-        cleaning_messages = []
-        if rows_dropped_nan > 0:
-            cleaning_messages.append(f"Dropped {rows_dropped_nan} rows with NaN values")
-        if duplicates_removed > 0:
-            cleaning_messages.append(f"Removed {duplicates_removed} duplicate rows")
-        if rows_dropped_blank > 0:
-            cleaning_messages.append(f"Dropped {rows_dropped_blank} blank rows")
-        if columns_dropped > 0:
-            cleaning_messages.append(f"Dropped {columns_dropped} columns: {', '.join(existing_columns)}")
-
-        if not cleaning_messages:
-            cleaning_messages.append("No NaN, duplicates, blank rows, or specified columns to drop")
-
-        return df, cleaning_messages
+        return df, simplified_messages
     except Exception as e:
-        logger.error(f"Data cleaning error: {e}")
-        return None, [f"Error during cleaning: {str(e)}"]
+        logger.error(f"Data cleaning and validation error: {e}")
+        return None, [f"Error during cleaning and validation: {str(e)}"]
 
-# File parsing function
+# Updated file parsing function
 def parse_contents(contents, filename):
     try:
         logger.info(f"Parsing file: {filename}")
@@ -152,8 +161,7 @@ def parse_contents(contents, filename):
         encoding = chardet.detect(decoded)['encoding'] or 'utf-8'
         logger.info(f"Detected encoding: {encoding}")
         if filename.endswith('.csv'):
-            # Limit the number of rows to reduce memory usage
-            df = pd.read_csv(io.StringIO(decoded.decode(encoding)), low_memory=False, engine='c', nrows=1000)
+            df = pd.read_csv(io.StringIO(decoded.decode(encoding)), low_memory=False, engine='c')
         elif filename.endswith('.xlsx'):
             df = pd.read_excel(io.BytesIO(decoded), engine='openpyxl')
         else:
@@ -163,13 +171,13 @@ def parse_contents(contents, filename):
             logger.error("Uploaded file is empty")
             return None, ["Uploaded file is empty"]
         
-        df, cleaning_messages = clean_data(df)
+        df, messages = clean_and_validate_data(df)
         if df is None:
-            logger.error("Failed to clean data")
-            return None, cleaning_messages
+            logger.error("Failed to clean and validate data")
+            return None, messages
         
         logger.info(f"File parsed successfully: {df.shape}")
-        return df, cleaning_messages
+        return df, messages
     except UnicodeDecodeError as e:
         logger.error(f"UnicodeDecodeError: {e}")
         return None, [f"Error decoding file: {str(e)}. Try saving the file with UTF-8 encoding."]
@@ -180,13 +188,12 @@ def parse_contents(contents, filename):
         logger.error(f"File parsing error: {e}")
         return None, [f"Error parsing file: {str(e)}"]
 
-# Chart generation functions
+# Chart generation functions (unchanged)
 def generate_main_chart(df, selected_column, selected_y_axis, chart_type, dark_mode, selected_category):
     try:
         if not selected_column or not selected_y_axis:
             return px.scatter(title="Please select X and Y axes")
         
-        # Sample the dataset to reduce memory usage
         if len(df) > 1000:
             df = df.sample(1000, random_state=42)
         
@@ -252,7 +259,6 @@ def generate_pie_chart(df, selected_column, selected_y_axis, dark_mode, selected
     try:
         if not selected_column or not selected_y_axis:
             return px.scatter(title="No pie chart generated")
-        # Sample the dataset to reduce memory usage
         if len(df) > 1000:
             df = df.sample(1000, random_state=42)
         fig = px.pie(df, names=selected_column, values=selected_y_axis, 
@@ -271,7 +277,6 @@ def generate_line_chart(df, selected_column, selected_y_axis, dark_mode, selecte
     try:
         if not selected_column or not selected_y_axis:
             return px.scatter(title="No line chart generated")
-        # Sample the dataset to reduce memory usage
         if len(df) > 1000:
             df = df.sample(1000, random_state=42)
         fig = px.line(df, x=selected_column, y=selected_y_axis,
@@ -285,12 +290,11 @@ def generate_line_chart(df, selected_column, selected_y_axis, dark_mode, selecte
         logger.error(f"Line chart generation error: {e}")
         return px.scatter(title=f"Error: {str(e)}")
 
-# Analysis Functions
+# Analysis Functions (unchanged)
 def generate_correlation_heatmap(df, dark_mode):
     numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
     if len(numerical_cols) < 2:
         return px.scatter(title="Not enough numerical columns for correlation analysis")
-    # Sample the dataset to reduce memory usage
     if len(df) > 1000:
         df = df.sample(1000, random_state=42)
     corr_matrix = df[numerical_cols].corr()
@@ -325,7 +329,6 @@ def generate_trend_chart(df, date_column, y_axis, dark_mode):
     if not date_column or not y_axis or date_column not in df.columns or y_axis not in df.columns:
         return px.scatter(title="Select a date column and Y-axis for trend analysis")
     df[date_column] = pd.to_datetime(df[date_column], errors='coerce')
-    # Sample the dataset to reduce memory usage
     if len(df) > 1000:
         df = df.sample(1000, random_state=42)
     trend_data = df.groupby(date_column)[y_axis].sum().reset_index()
@@ -333,21 +336,18 @@ def generate_trend_chart(df, date_column, y_axis, dark_mode):
     fig.update_layout(title=f"Trend of {y_axis} Over Time")
     return fig
 
-# Updated generate_forecast function to fix the flat forecast issue
-def generate_forecast(df, date_column, y_axis, periods=15, dark_mode=True):
+def generate_forecast(df, date_column, y_axis, periods=30, dark_mode=True):
     try:
         logger.info("Generating forecast chart")
         if not date_column or not y_axis or date_column not in df.columns or y_axis not in df.columns:
             logger.error("Missing date column or Y-axis for forecasting")
             return px.scatter(title="Select a date column and Y-axis for forecasting")
 
-        # Convert date column to datetime
         df[date_column] = pd.to_datetime(df[date_column], errors='coerce')
         if df[date_column].isna().all():
             logger.error("All dates are invalid after conversion")
             return px.scatter(title="Invalid date column format")
 
-        # Prepare the data for Prophet
         forecast_data = df[[date_column, y_axis]].rename(columns={date_column: 'ds', y_axis: 'y'})
         forecast_data = forecast_data.dropna()
         logger.info(f"Forecast data shape after dropping NaNs: {forecast_data.shape}")
@@ -356,44 +356,63 @@ def generate_forecast(df, date_column, y_axis, periods=15, dark_mode=True):
             logger.error("Not enough data for forecasting")
             return px.scatter(title="Not enough data for forecasting")
 
-        # Log the date range of the actual data
         min_date = forecast_data['ds'].min()
         max_date = forecast_data['ds'].max()
         logger.info(f"Actual data date range: {min_date} to {max_date}")
 
-        # Aggregate data by date to ensure one value per day
         forecast_data = forecast_data.groupby('ds')['y'].sum().reset_index()
         logger.info(f"Forecast data shape after aggregation: {forecast_data.shape}")
 
-        # Force daily seasonality for small datasets
-        model = Prophet(
-            yearly_seasonality=False,  # Not enough data for yearly seasonality
-            weekly_seasonality=True,   # Enable weekly seasonality
-            daily_seasonality=True     # Force daily seasonality to capture patterns
-        )
-        # Add custom daily seasonality with a shorter period to capture the observed spikes
-        model.add_seasonality(name='daily_custom', period=1, fourier_order=5)
+        train_size = int(len(forecast_data) * 0.8)
+        train_data = forecast_data[:train_size]
+        test_data = forecast_data[train_size:]
 
-        # Fit the model
-        model.fit(forecast_data)
+        model = Prophet(
+            yearly_seasonality=True,
+            weekly_seasonality=True,
+            daily_seasonality=True,
+            changepoint_prior_scale=0.05,
+            seasonality_prior_scale=10.0
+        )
+        model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+
+        regressors = [col for col in ['price', 'stock'] if col in df.columns]
+        for regressor in regressors:
+            model.add_regressor(regressor)
+
+        train_data_with_regressors = df[[date_column, y_axis] + regressors].rename(columns={date_column: 'ds', y_axis: 'y'})
+        train_data_with_regressors = train_data_with_regressors[train_data_with_regressors['ds'].isin(train_data['ds'])]
+        train_data_with_regressors = train_data_with_regressors.groupby('ds').agg({
+            'y': 'sum',
+            **{regressor: 'mean' for regressor in regressors}
+        }).reset_index()
+
+        model.fit(train_data_with_regressors)
         logger.info("Prophet model fitted successfully")
 
-        # Create future dates for forecasting
-        future = model.make_future_dataframe(periods=periods, freq='D')
+        future = model.make_future_dataframe(periods=periods + len(test_data), freq='D')
+        for regressor in regressors:
+            future[regressor] = df[regressor].mean()
         logger.info(f"Future dates range: {future['ds'].min()} to {future['ds'].max()}")
 
-        # Generate forecast
         forecast = model.predict(future)
         logger.info("Forecast generated successfully")
 
-        # Create the plot
+        test_forecast = forecast[forecast['ds'].isin(test_data['ds'])]
+        test_actual = test_data['y'].values
+        test_predicted = test_forecast['yhat'].values
+        mae = mean_absolute_error(test_actual, test_predicted)
+        rmse = np.sqrt(mean_squared_error(test_actual, test_predicted))
+        mape = np.mean(np.abs((test_actual - test_predicted) / test_actual)) * 100
+        accuracy_message = f"MAE: {mae:.2f}, RMSE: {rmse:.2f}, MAPE: {mape:.2f}%"
+
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=forecast_data['ds'], y=forecast_data['y'], mode='lines', name='Actual', line=dict(color='#1f77b4')))
         fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], mode='lines', name='Forecast', line=dict(color='#ff7f0e')))
         fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_lower'], fill=None, mode='lines', line=dict(color='rgba(0,0,0,0)'), showlegend=False))
         fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_upper'], fill='tonexty', mode='lines', line=dict(color='rgba(0,0,0,0)'), name='Confidence Interval'))
         fig.update_layout(
-            title=f"Forecast of {y_axis} for Next {periods} Days",
+            title=f"Forecast of {y_axis} for Next {periods} Days ({accuracy_message})",
             template='plotly_dark' if dark_mode else 'plotly',
             xaxis_title="Date",
             yaxis_title=y_axis,
@@ -408,7 +427,6 @@ def generate_clustering_report(df):
     numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
     if len(numerical_cols) < 2:
         return "Not enough numerical columns for clustering report"
-    # Sample the dataset to reduce memory usage
     if len(df) > 1000:
         df = df.sample(1000, random_state=42)
     kmeans = KMeans(n_clusters=3, n_init=10)
@@ -431,12 +449,10 @@ def generate_feature_importance(df, target_column, dark_mode):
     features = [col for col in features if col != target_column]
     if not features:
         return px.scatter(title="Not enough numerical features for analysis")
-    # Sample the dataset to reduce memory usage
     if len(df) > 1000:
         df = df.sample(1000, random_state=42)
     X = df[features].fillna(0)
     y = df[target_column].fillna(0)
-    # Reduce the number of trees to lower memory usage
     model = RandomForestRegressor(n_estimators=10, random_state=42)
     model.fit(X, y)
     importances = model.feature_importances_
@@ -444,7 +460,7 @@ def generate_feature_importance(df, target_column, dark_mode):
     fig.update_layout(title=f"Feature Importance for {target_column}", xaxis_title="Importance", yaxis_title="Feature")
     return fig
 
-# Sidebar content
+# Sidebar content (unchanged)
 sidebar = dbc.Col([
     dbc.Card([
         dbc.CardBody([
@@ -492,7 +508,7 @@ sidebar = dbc.Col([
     ], className="bg-card-dark border-0 shadow-sm")
 ], width=3, className="sidebar collapse show", id="sidebar")
 
-# Main content
+# Main content (unchanged)
 main_content = dbc.Col([
     dbc.NavbarSimple(brand="📊 Advanced Data Analysis Dashboard", color="dark", dark=True, className="mb-4 navbar-dark"),
     html.Div(id='row-comparison', className="mb-3 text-center text-light"),
@@ -590,7 +606,7 @@ main_content = dbc.Col([
     dcc.Store(id='selected-category')
 ], width=9)
 
-# Layout
+# Layout (unchanged)
 app.layout = dbc.Container([
     dbc.Row([
         sidebar,
@@ -598,7 +614,7 @@ app.layout = dbc.Container([
     ], className="min-vh-100")
 ], fluid=True, className="bg-gradient-dark")
 
-# Main callback
+# Updated main callback to handle simplified cleaning messages
 @app.callback(
     [Output('column-filter', 'options'),
      Output('value-filter', 'options'),
@@ -660,25 +676,25 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         if triggered_id == 'upload-data':
             if contents:
                 logger.info("Processing new upload")
-                df, cleaning_messages = parse_contents(contents, filename)
+                df, messages = parse_contents(contents, filename)
                 if df is not None:
                     data_store.df = df
                 else:
                     logger.error("Failed to parse contents")
                     default_fig = px.scatter(title="Error loading file")
-                    return [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + ["❌ Error loading file", "Error loading data", None, "Error", "Failed to load data table", html.Ul([html.Li(msg) for msg in cleaning_messages]), "", [], "Error loading data", "Error loading data"]
+                    return [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + ["❌ Error loading file", "Error loading data", None, "Error", "Failed to load data table", html.Ul([html.Li(msg) for msg in messages]), "", [], "Error loading data", "Error loading data"]
             else:
                 logger.error("No contents provided for new upload")
                 return default_outputs
         else:
             logger.info("Using stored DataFrame")
             df = data_store.df
-            cleaning_messages = ["Using previously cleaned data"]
+            messages = ["Using previously cleaned data"]
 
         if df is None:
             logger.error("DataFrame is None")
             default_fig = px.scatter(title="No data available")
-            return [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + ["No data available", "No data available", None, "No data", "No data available", html.Ul([html.Li(msg) for msg in cleaning_messages]), "", [], "No data available", "No data available"]
+            return [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + ["No data available", "No data available", None, "No data", "No data available", html.Ul([html.Li(msg) for msg in messages]), "", [], "No data available", "No data available"]
 
         logger.info(f"DataFrame shape after loading: {df.shape}")
         logger.info(f"DataFrame columns: {df.columns.tolist()}")
@@ -719,12 +735,17 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         logger.info(f"Filtered DataFrame shape: {df_filtered.shape}")
         logger.info(f"Filtered DataFrame columns: {df_filtered.columns.tolist()}")
 
-        if 'price' in df_filtered.columns:
+        # Apply what-if adjustments
+        if 'price' in df_filtered.columns and pd.api.types.is_numeric_dtype(df_filtered['price']):
             df_filtered['price'] = df_filtered['price'] * (1 + price_adjust / 100)
-        if 'sales' in df_filtered.columns:
+        if 'sales' in df_filtered.columns and pd.api.types.is_numeric_dtype(df_filtered['sales']):
             df_filtered['sales'] = df_filtered['sales'] * (1 + sales_adjust / 100)
         if 'price' in df_filtered.columns and 'sales' in df_filtered.columns:
-            df_filtered['revenue'] = df_filtered['price'] * df_filtered['sales']
+            # Ensure both columns are numeric before multiplication
+            if pd.api.types.is_numeric_dtype(df_filtered['price']) and pd.api.types.is_numeric_dtype(df_filtered['sales']):
+                df_filtered['revenue'] = df_filtered['price'] * df_filtered['sales']
+            else:
+                logger.warning("Skipping revenue calculation: 'price' or 'sales' is not numeric after conversion")
 
         selected_category = None
         if triggered_id == 'main-chart' and click_data and chart_type in ['bar', 'scatter', 'line', 'regression']:
@@ -745,13 +766,30 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         logger.info("Generating trend chart")
         trend_fig = generate_trend_chart(df_filtered, date_column, selected_y_axis, dark_mode)
         logger.info("Generating forecast chart")
-        forecast_fig = generate_forecast(df_filtered, date_column, selected_y_axis, periods=15, dark_mode=dark_mode)
+        forecast_fig = generate_forecast(df_filtered, date_column, selected_y_axis, periods=30, dark_mode=dark_mode)
         logger.info("Generating feature importance chart")
         feature_importance_fig = generate_feature_importance(df_filtered, target_column, dark_mode)
 
-        logger.info("Generating insights")
+        logger.info("Generating insights with monthly analysis")
         insights = [html.P(f"🔹 {col}: {df[col].nunique()} unique", className="text-light") 
                     for col in df.columns]
+
+        if date_column and date_column in df_filtered.columns and 'sales' in df_filtered.columns:
+            df_monthly = df_filtered[df_filtered[date_column] != pd.Timestamp('1970-01-01')].copy()
+            df_monthly['month'] = df_monthly[date_column].dt.month
+            monthly_summary = df_monthly.groupby('month').agg({
+                'sales': 'sum',
+                'revenue': 'sum' if 'revenue' in df_monthly.columns else lambda x: 0,
+                'order_id (unique)': 'count' if 'order_id (unique)' in df_monthly.columns else lambda x: 0
+            }).reset_index()
+            monthly_summary.columns = ['Month', 'Total Sales', 'Total Revenue', 'Number of Orders']
+            insights.append(html.H6("Monthly Sales Summary:", className="text-light mt-2"))
+            for _, row in monthly_summary.iterrows():
+                insights.append(html.P(
+                    f"Month {int(row['Month'])}: Sales = {row['Total Sales']:.2f}, "
+                    f"Revenue = {row['Total Revenue']:.2f}, Orders = {int(row['Number of Orders'])}",
+                    className="text-light"
+                ))
 
         logger.info("Generating summary statistics")
         summary_stats = "Select a Y-axis for statistics"
@@ -814,7 +852,7 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
             selected_category,
             debug_info,
             "",
-            html.Ul([html.Li(msg) for msg in cleaning_messages]),
+            html.Ul([html.Li(msg) for msg in messages]),
             row_comparison_message,
             outlier_options,
             outlier_message if outlier_message else "Select an outlier",
@@ -825,7 +863,7 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         default_fig = px.scatter(title=f"Dashboard error: {str(e)}")
         return [[] for _ in range(5)] + [default_fig] * 7 + [[] for _ in range(3)] + [f"❌ Error: {str(e)}", "Error loading data", None, "Error", f"Failed to load data table: {str(e)}", "Error during update", "", [], "Error loading data", "Error loading data"]
 
-# Separate callback for "All Charts" tab
+# Separate callback for "All Charts" tab (unchanged)
 @app.callback(
     [Output('main-chart-all', 'figure'),
      Output('pie-chart-all', 'figure'),
@@ -857,7 +895,7 @@ def update_all_charts_tab(active_tab, selected_column, selected_values, selected
         logger.error(f"All charts update error: {str(e)}")
         return [px.scatter(title=f"Error: {str(e)}")] * 3
 
-# Callback to handle "Download All Charts" button
+# Callback to handle "Download All Charts" button (unchanged)
 @app.callback(
     Output("download-all-charts-zip", "data"),
     Input("download-all-charts", "n_clicks"),
@@ -896,7 +934,7 @@ def download_all_charts(n_clicks, main_fig, pie_fig, line_fig):
         logger.error(f"Error creating ZIP file: {str(e)}")
         return None
 
-# Modal callback for enlarged chart
+# Modal callback for enlarged chart (unchanged)
 @app.callback(
     [Output('chart-modal', 'is_open'),
      Output('enlarged-chart', 'figure')],
@@ -928,7 +966,7 @@ def toggle_modal(main_click, pie_click, line_click, close_click, main_fig, pie_f
     
     return is_open, {}
 
-# Download callback for filtered data
+# Download callback for filtered data (unchanged)
 @app.callback(
     Output("download-dataframe-csv", "data"),
     Input("download-button", "n_clicks"),
@@ -941,7 +979,7 @@ def download_data(n_clicks):
         return dcc.send_data_frame(data_store.df.to_csv, "dashboard_data.csv")
     return None
 
-# Custom CSS
+# Custom CSS (unchanged)
 app.index_string = '''
 <!DOCTYPE html>
 <html>
