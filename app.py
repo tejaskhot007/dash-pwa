@@ -143,7 +143,7 @@ def clean_data(df):
         logger.error(f"Data cleaning error: {e}")
         return None, [f"Error during cleaning: {str(e)}"]
 
-# File parsing function (Improved error handling)
+# File parsing function
 def parse_contents(contents, filename):
     try:
         logger.info(f"Parsing file: {filename}")
@@ -333,37 +333,76 @@ def generate_trend_chart(df, date_column, y_axis, dark_mode):
     fig.update_layout(title=f"Trend of {y_axis} Over Time")
     return fig
 
-# Data Science Functions (Optimized for memory usage)
+# Updated generate_forecast function to fix the flat forecast issue
 def generate_forecast(df, date_column, y_axis, periods=15, dark_mode=True):
-    if not date_column or not y_axis or date_column not in df.columns or y_axis not in df.columns:
-        return px.scatter(title="Select a date column and Y-axis for forecasting")
-    df[date_column] = pd.to_datetime(df[date_column], errors='coerce')
-    # Sample the dataset to reduce memory usage
-    if len(df) > 1000:
-        df = df.sample(1000, random_state=42)
-    forecast_data = df[[date_column, y_axis]].rename(columns={date_column: 'ds', y_axis: 'y'})
-    forecast_data = forecast_data.dropna()
-    if len(forecast_data) < 2:
-        return px.scatter(title="Not enough data for forecasting")
-    # Adjust seasonality based on dataset size
-    model = Prophet(
-        yearly_seasonality=len(forecast_data) > 365,
-        weekly_seasonality=len(forecast_data) > 90,
-        daily_seasonality=len(forecast_data) > 30
-    )
-    model.fit(forecast_data)
-    future = model.make_future_dataframe(periods=periods)
-    forecast = model.predict(future)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=forecast_data['ds'], y=forecast_data['y'], mode='lines', name='Actual'))
-    fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], mode='lines', name='Forecast'))
-    fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_lower'], fill=None, mode='lines', line=dict(color='rgba(0,0,0,0)'), showlegend=False))
-    fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_upper'], fill='tonexty', mode='lines', line=dict(color='rgba(0,0,0,0)'), name='Confidence Interval'))
-    fig.update_layout(
-        title=f"Forecast of {y_axis} for Next {periods} Days",
-        template='plotly_dark' if dark_mode else 'plotly'
-    )
-    return fig
+    try:
+        logger.info("Generating forecast chart")
+        if not date_column or not y_axis or date_column not in df.columns or y_axis not in df.columns:
+            logger.error("Missing date column or Y-axis for forecasting")
+            return px.scatter(title="Select a date column and Y-axis for forecasting")
+
+        # Convert date column to datetime
+        df[date_column] = pd.to_datetime(df[date_column], errors='coerce')
+        if df[date_column].isna().all():
+            logger.error("All dates are invalid after conversion")
+            return px.scatter(title="Invalid date column format")
+
+        # Prepare the data for Prophet
+        forecast_data = df[[date_column, y_axis]].rename(columns={date_column: 'ds', y_axis: 'y'})
+        forecast_data = forecast_data.dropna()
+        logger.info(f"Forecast data shape after dropping NaNs: {forecast_data.shape}")
+
+        if len(forecast_data) < 2:
+            logger.error("Not enough data for forecasting")
+            return px.scatter(title="Not enough data for forecasting")
+
+        # Log the date range of the actual data
+        min_date = forecast_data['ds'].min()
+        max_date = forecast_data['ds'].max()
+        logger.info(f"Actual data date range: {min_date} to {max_date}")
+
+        # Aggregate data by date to ensure one value per day
+        forecast_data = forecast_data.groupby('ds')['y'].sum().reset_index()
+        logger.info(f"Forecast data shape after aggregation: {forecast_data.shape}")
+
+        # Force daily seasonality for small datasets
+        model = Prophet(
+            yearly_seasonality=False,  # Not enough data for yearly seasonality
+            weekly_seasonality=True,   # Enable weekly seasonality
+            daily_seasonality=True     # Force daily seasonality to capture patterns
+        )
+        # Add custom daily seasonality with a shorter period to capture the observed spikes
+        model.add_seasonality(name='daily_custom', period=1, fourier_order=5)
+
+        # Fit the model
+        model.fit(forecast_data)
+        logger.info("Prophet model fitted successfully")
+
+        # Create future dates for forecasting
+        future = model.make_future_dataframe(periods=periods, freq='D')
+        logger.info(f"Future dates range: {future['ds'].min()} to {future['ds'].max()}")
+
+        # Generate forecast
+        forecast = model.predict(future)
+        logger.info("Forecast generated successfully")
+
+        # Create the plot
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=forecast_data['ds'], y=forecast_data['y'], mode='lines', name='Actual', line=dict(color='#1f77b4')))
+        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], mode='lines', name='Forecast', line=dict(color='#ff7f0e')))
+        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_lower'], fill=None, mode='lines', line=dict(color='rgba(0,0,0,0)'), showlegend=False))
+        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_upper'], fill='tonexty', mode='lines', line=dict(color='rgba(0,0,0,0)'), name='Confidence Interval'))
+        fig.update_layout(
+            title=f"Forecast of {y_axis} for Next {periods} Days",
+            template='plotly_dark' if dark_mode else 'plotly',
+            xaxis_title="Date",
+            yaxis_title=y_axis,
+            hovermode='x unified'
+        )
+        return fig
+    except Exception as e:
+        logger.error(f"Forecast generation error: {str(e)}")
+        return px.scatter(title=f"Error in forecasting: {str(e)}")
 
 def generate_clustering_report(df):
     numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
@@ -453,7 +492,7 @@ sidebar = dbc.Col([
     ], className="bg-card-dark border-0 shadow-sm")
 ], width=3, className="sidebar collapse show", id="sidebar")
 
-# Main content (Added loading spinners)
+# Main content
 main_content = dbc.Col([
     dbc.NavbarSimple(brand="📊 Advanced Data Analysis Dashboard", color="dark", dark=True, className="mb-4 navbar-dark"),
     html.Div(id='row-comparison', className="mb-3 text-center text-light"),
@@ -559,7 +598,7 @@ app.layout = dbc.Container([
     ], className="min-vh-100")
 ], fluid=True, className="bg-gradient-dark")
 
-# Main callback (Updated to preserve data_store.df)
+# Main callback
 @app.callback(
     [Output('column-filter', 'options'),
      Output('value-filter', 'options'),
