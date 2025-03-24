@@ -18,6 +18,7 @@ from sklearn.ensemble import RandomForestRegressor
 from prophet import Prophet
 import zipfile
 from sklearn.metrics import mean_absolute_error, mean_squared_error
+import time  # Added for timing logs
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -154,7 +155,7 @@ def clean_and_validate_data(df):
         logger.error(f"Data cleaning and validation error: {e}")
         return None, [f"Error during cleaning and validation: {str(e)}"]
 
-# Updated file parsing function with downsampling and memory optimization
+# Updated file parsing function (added 'sales' to columns_to_keep)
 def parse_contents(contents, filename, max_rows=10000):
     try:
         logger.info(f"Parsing file: {filename}")
@@ -174,8 +175,8 @@ def parse_contents(contents, filename, max_rows=10000):
             return None, ["Uploaded file is empty"]
 
         # Drop unnecessary columns to reduce memory usage
-        # Keep only relevant columns for analysis
-        columns_to_keep = ['order_id (unique)', 'product_id', 'store_id', 'revenue', 'stock', 'price', 'order_date']
+        # Added 'sales' to the list of columns to keep
+        columns_to_keep = ['order_id (unique)', 'product_id', 'store_id', 'revenue', 'stock', 'price', 'order_date', 'sales']
         columns_to_drop = [col for col in df.columns if col not in columns_to_keep]
         if columns_to_drop:
             df = df.drop(columns=columns_to_drop, errors='ignore')
@@ -357,29 +358,29 @@ def generate_trend_chart(df, date_column, y_axis, dark_mode):
     fig.update_layout(title=f"Trend of {y_axis} Over Time")
     return fig
 
-# Updated generate_forecast function to handle missing date column and Y-axis issues
+# Updated generate_forecast function to adjust logging and improve user message
 def generate_forecast(df, date_column, y_axis, periods=30, dark_mode=True):
     try:
         logger.info("Generating forecast chart")
 
         # Check for date column and Y-axis
         if not date_column or date_column not in df.columns:
-            logger.error("No date column selected or available for forecasting")
-            return px.scatter(title="No date column selected. Please select a date column in the sidebar.")
+            logger.info("No date column selected or available for forecasting")
+            return px.scatter(title="No date column available. Please ensure your dataset includes a date column (e.g., 'order_date') and select it in the sidebar.")
         
         if not y_axis or y_axis not in df.columns:
-            logger.error("No Y-axis selected for forecasting")
+            logger.info("No Y-axis selected for forecasting")
             return px.scatter(title="No Y-axis selected. Please select a numerical Y-axis in the sidebar.")
 
         # Validate that Y-axis is numerical
         if not pd.api.types.is_numeric_dtype(df[y_axis]):
-            logger.error(f"Y-axis '{y_axis}' is not numerical")
+            logger.info(f"Y-axis '{y_axis}' is not numerical")
             return px.scatter(title=f"Y-axis '{y_axis}' is not numerical. Please select a numerical column.")
 
         # Convert date column to datetime
         df[date_column] = pd.to_datetime(df[date_column], errors='coerce')
         if df[date_column].isna().all():
-            logger.error("All dates are invalid after conversion")
+            logger.info("All dates are invalid after conversion")
             return px.scatter(title="Invalid date column format. Ensure the date column contains valid dates.")
 
         # Prepare data for Prophet
@@ -388,7 +389,7 @@ def generate_forecast(df, date_column, y_axis, periods=30, dark_mode=True):
         logger.info(f"Forecast data shape after dropping NaNs: {forecast_data.shape}")
 
         if len(forecast_data) < 2:
-            logger.error("Not enough data for forecasting")
+            logger.info("Not enough data for forecasting")
             return px.scatter(title="Not enough data for forecasting. Need at least 2 valid data points.")
 
         # Check date range
@@ -660,7 +661,7 @@ app.layout = dbc.Container([
     ], className="min-vh-100")
 ], fluid=True, className="bg-gradient-dark")
 
-# Main callback (updated to ensure downsampling and add logging)
+# Main callback (added timing logs and optimization)
 @app.callback(
     [Output('column-filter', 'options'),
      Output('value-filter', 'options'),
@@ -704,6 +705,7 @@ app.layout = dbc.Container([
     [State('upload-data', 'filename')]
 )
 def update_dashboard(contents, selected_column, selected_values, selected_y_axis, chart_type, dark_mode, click_data, clear_clicks, page_current, page_size, date_column, target_column, price_adjust, sales_adjust, filename):
+    start_time = time.time()  # Start timing the callback
     try:
         logger.info("update_dashboard callback triggered")
         logger.info(f"Contents: {contents is not None}, Filename: {filename}")
@@ -722,7 +724,6 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         if triggered_id == 'upload-data':
             if contents:
                 logger.info("Processing new upload")
-                # Ensure max_rows is explicitly passed
                 df, messages = parse_contents(contents, filename, max_rows=10000)
                 if df is not None:
                     data_store.df = df
@@ -749,6 +750,7 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         # Log available date columns for debugging
         datetime_cols = df.select_dtypes(include=['datetime']).columns.tolist()
         logger.info(f"Available datetime columns: {datetime_cols}")
+        logger.info(f"Time after loading data: {time.time() - start_time:.2f} seconds")
 
         row_comparison_message = ""
         if filename == "up sales 2017.csv":
@@ -779,6 +781,7 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         value_options = ([{'label': str(val), 'value': val} 
                          for val in df[selected_column].dropna().unique()] 
                          if selected_column in df.columns else [])
+        logger.info(f"Time after generating dropdown options: {time.time() - start_time:.2f} seconds")
         
         logger.info("Filtering DataFrame")
         df_filtered = df[df[selected_column].isin(selected_values)] if selected_column and selected_values else df.copy()
@@ -796,6 +799,7 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
                 df_filtered['revenue'] = df_filtered['price'] * df_filtered['sales']
             else:
                 logger.warning("Skipping revenue calculation: 'price' or 'sales' is not numeric after conversion")
+        logger.info(f"Time after what-if adjustments: {time.time() - start_time:.2f} seconds")
 
         selected_category = None
         if triggered_id == 'main-chart' and click_data and chart_type in ['bar', 'scatter', 'line', 'regression']:
@@ -805,20 +809,34 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
             logger.info("Clearing selection")
             selected_category = None
 
+        # Generate charts (optimized to avoid redundant calls)
         logger.info("Generating main chart")
         main_fig = generate_main_chart(df_filtered, selected_column, selected_y_axis, chart_type, dark_mode, selected_category)
+        logger.info(f"Time after main chart: {time.time() - start_time:.2f} seconds")
+
         logger.info("Generating pie chart")
         pie_fig = generate_pie_chart(df_filtered, selected_column, selected_y_axis, dark_mode, selected_category)
+        logger.info(f"Time after pie chart: {time.time() - start_time:.2f} seconds")
+
         logger.info("Generating line chart")
         line_fig = generate_line_chart(df_filtered, selected_column, selected_y_axis, dark_mode, selected_category)
+        logger.info(f"Time after line chart: {time.time() - start_time:.2f} seconds")
+
         logger.info("Generating correlation heatmap")
         correlation_fig = generate_correlation_heatmap(df_filtered, dark_mode)
+        logger.info(f"Time after correlation heatmap: {time.time() - start_time:.2f} seconds")
+
         logger.info("Generating trend chart")
         trend_fig = generate_trend_chart(df_filtered, date_column, selected_y_axis, dark_mode)
+        logger.info(f"Time after trend chart: {time.time() - start_time:.2f} seconds")
+
         logger.info("Generating forecast chart")
         forecast_fig = generate_forecast(df_filtered, date_column, selected_y_axis, periods=30, dark_mode=dark_mode)
+        logger.info(f"Time after forecast chart: {time.time() - start_time:.2f} seconds")
+
         logger.info("Generating feature importance chart")
         feature_importance_fig = generate_feature_importance(df_filtered, target_column, dark_mode)
+        logger.info(f"Time after feature importance chart: {time.time() - start_time:.2f} seconds")
 
         logger.info("Generating insights with monthly analysis")
         insights = [html.P(f"🔹 {col}: {df[col].nunique()} unique", className="text-light") 
@@ -840,6 +858,7 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
                     f"Revenue = {row['Total Revenue']:.2f}, Orders = {int(row['Number of Orders'])}",
                     className="text-light"
                 ))
+        logger.info(f"Time after insights: {time.time() - start_time:.2f} seconds")
 
         logger.info("Generating summary statistics")
         summary_stats = "Select a Y-axis for statistics"
@@ -853,21 +872,27 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
                 html.Li(f"Count: {int(stats['count'])}", className="text-light"),
                 html.Li(f"Std Dev: {stats['std']:.2f}", className="text-light")
             ], className="list-unstyled")
+        logger.info(f"Time after summary stats: {time.time() - start_time:.2f} seconds")
 
         logger.info("Detecting outliers")
         outlier_options, outlier_message = detect_outliers(df_filtered, selected_y_axis)
+        logger.info(f"Time after outlier detection: {time.time() - start_time:.2f} seconds")
 
         logger.info("Generating clustering report")
         clustering_report = generate_clustering_report(df_filtered) if chart_type == 'cluster' else "Select 'Clustering' chart type to view report"
+        logger.info(f"Time after clustering report: {time.time() - start_time:.2f} seconds")
 
         logger.info("Converting DataFrame to string for DataTable")
         df_filtered = df_filtered.astype(str)
+        logger.info(f"Time after DataFrame conversion: {time.time() - start_time:.2f} seconds")
+
         logger.info("Preparing row data with pagination")
         start_idx = page_current * page_size
         end_idx = start_idx + page_size
         row_data = df_filtered.iloc[start_idx:end_idx].to_dict('records')
         logger.info(f"Paginated row data prepared: {len(row_data)} rows (page {page_current + 1})")
         logger.info(f"Sample row data: {row_data[:2] if row_data else 'Empty'}")
+        logger.info(f"Time after pagination: {time.time() - start_time:.2f} seconds")
 
         logger.info("Generating column definitions")
         if df_filtered.empty:
@@ -877,10 +902,13 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         else:
             column_defs = [{"name": col.replace('_', ' ').title(), "id": col} for col in df_filtered.columns]
         logger.info(f"Column definitions generated: {column_defs}")
+        logger.info(f"Time after column definitions: {time.time() - start_time:.2f} seconds")
 
         debug_info = f"Rows: {len(row_data)}, Columns: {len(column_defs)}"
 
         logger.info("Returning callback outputs")
+        total_time = time.time() - start_time
+        logger.info(f"Total callback execution time: {total_time:.2f} seconds")
         return (
             [{'label': col, 'value': col} for col in categorical_cols],
             value_options,
