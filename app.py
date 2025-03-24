@@ -49,18 +49,18 @@ class DataStore:
 
 data_store = DataStore()
 
-# Updated data cleaning and validation function with simplified output
+# Optimized data cleaning and validation function (unchanged)
 def clean_and_validate_data(df):
     try:
         # Step 1: Store the raw DataFrame before any modifications
         if data_store.raw_df is None:
             data_store.raw_df = df.copy()
-            data_store.original_row_count = len(df)  # Store the original row count
+            data_store.original_row_count = len(df)
 
-        # Initialize messages for the dashboard (simplified output)
+        # Initialize messages for the dashboard
         simplified_messages = []
 
-        # Step 2: Identifying Issues (only collect data for simplified output)
+        # Step 2: Identifying Issues
         # 2.1. Missing Values
         total_nan = df.isna().sum().sum()
         simplified_messages.append(f"Total NaN values: {total_nan}")
@@ -68,20 +68,34 @@ def clean_and_validate_data(df):
         # 2.2. Duplicates
         # Duplicate Rows
         duplicate_rows = len(df) - len(df.drop_duplicates())
-        # Duplicate Columns
-        duplicate_columns = df.T.duplicated().sum()
-        duplicate_column_names = df.columns[df.T.duplicated()].tolist()
         simplified_messages.append(f"Duplicate rows: {duplicate_rows}")
-        simplified_messages.append(f"Duplicate columns: {duplicate_columns}")
-        if duplicate_columns > 0:
-            simplified_messages.append(f"Duplicate columns list: {', '.join(duplicate_column_names)}")
+
+        # Check for duplicate columns more efficiently
+        duplicate_columns = 0
+        duplicate_column_names = []
+        try:
+            # Instead of transposing, hash the columns to detect duplicates
+            col_hashes = {}
+            for col in df.columns:
+                col_data = df[col].astype(str).to_numpy().tobytes()  # Convert to bytes for hashing
+                if col_data in col_hashes:
+                    duplicate_columns += 1
+                    duplicate_column_names.append(col)
+                else:
+                    col_hashes[col_data] = col
+            simplified_messages.append(f"Duplicate columns: {duplicate_columns}")
+            if duplicate_columns > 0:
+                simplified_messages.append(f"Duplicate columns list: {', '.join(duplicate_column_names)}")
+        except Exception as e:
+            logger.warning(f"Error detecting duplicate columns: {e}")
+            simplified_messages.append("Could not detect duplicate columns due to memory constraints")
 
         # Step 3: Cleaning and Transforming Data
         initial_rows = len(df)
         initial_cols = len(df.columns)
 
         # 3.1. Standardization
-        # Standardize date formats (specify format to avoid warning)
+        # Standardize date formats
         for col in df.columns:
             if 'date' in col.lower():
                 df[col] = pd.to_datetime(df[col], format='%Y-%m-%d', errors='coerce')
@@ -90,19 +104,19 @@ def clean_and_validate_data(df):
         for col in df.select_dtypes(include=['object']).columns:
             df[col] = df[col].str.lower().str.strip()
 
-        # Convert 'price' and 'sales' to numeric, coercing errors to NaN
+        # Convert 'price' and 'sales' to numeric
         if 'price' in df.columns:
             df['price'] = pd.to_numeric(df['price'], errors='coerce')
         if 'sales' in df.columns:
             df['sales'] = pd.to_numeric(df['sales'], errors='coerce')
 
         # 3.2. Data Transformation
-        # Drop columns that are entirely NaN to avoid RuntimeWarning
+        # Drop columns that are entirely NaN
         df = df.dropna(how='all', axis=1)
 
         # Handle missing values: Impute numeric with median, categorical with mode
         rows_with_na = df[df.isna().any(axis=1)]
-        rows_dropped_na = 0  # Track rows dropped due to NaN (if any)
+        rows_dropped_na = 0
 
         # Drop rows where all values are NaN
         initial_rows_na = len(df)
@@ -121,39 +135,27 @@ def clean_and_validate_data(df):
 
         simplified_messages.append(f"Rows dropped due to NaN: {rows_dropped_na}")
 
-        # 3.3. Data Integration
-        # Not applicable (single dataset)
-
-        # 3.4. Data Reduction
+        # 3.3. Data Reduction
         # Remove duplicate rows
-        initial_rows = len(df)
         df = df.drop_duplicates(keep='first')
 
-        # Remove duplicate columns
-        duplicate_columns_to_drop = df.columns[df.T.duplicated()]
-        df = df.drop(columns=duplicate_columns_to_drop)
+        # Remove duplicate columns (based on the earlier detection)
+        if duplicate_column_names:
+            columns_to_drop = [col for col in duplicate_column_names if col in df.columns]
+            df = df.drop(columns=columns_to_drop)
 
-        # Remove columns with >90% missing values (before imputation)
+        # Remove columns with >90% missing values
         missing_threshold = 0.9
         columns_with_high_missing = data_store.raw_df.columns[data_store.raw_df.isna().mean() > missing_threshold]
         df = df.drop(columns=columns_with_high_missing, errors='ignore')
-
-        # Step 4: Validation and Verification (not included in simplified output)
-        # 4.1. Data Validation
-        remaining_nan = df.isna().sum().sum()
-        remaining_duplicate_rows = len(df) - len(df.drop_duplicates())
-        remaining_duplicate_columns = df.T.duplicated().sum()
-
-        # 4.2. Data Verification
-        # Verification is performed but not reported in the simplified output
 
         return df, simplified_messages
     except Exception as e:
         logger.error(f"Data cleaning and validation error: {e}")
         return None, [f"Error during cleaning and validation: {str(e)}"]
 
-# Updated file parsing function
-def parse_contents(contents, filename):
+# Updated file parsing function with downsampling and memory optimization
+def parse_contents(contents, filename, max_rows=10000):
     try:
         logger.info(f"Parsing file: {filename}")
         content_type, content_string = contents.split(',')
@@ -170,14 +172,33 @@ def parse_contents(contents, filename):
         if df.empty:
             logger.error("Uploaded file is empty")
             return None, ["Uploaded file is empty"]
-        
-        df, messages = clean_and_validate_data(df)
+
+        # Drop unnecessary columns to reduce memory usage
+        # Keep only relevant columns for analysis
+        columns_to_keep = ['order_id (unique)', 'product_id', 'store_id', 'revenue', 'stock', 'price', 'order_date']
+        columns_to_drop = [col for col in df.columns if col not in columns_to_keep]
+        if columns_to_drop:
+            df = df.drop(columns=columns_to_drop, errors='ignore')
+            logger.info(f"Dropped unnecessary columns to reduce memory usage: {columns_to_drop}")
+        else:
+            logger.info("No unnecessary columns to drop")
+
+        # Downsample if the dataset is too large
+        if len(df) > max_rows:
+            logger.warning(f"Dataset has {len(df)} rows, downsampling to {max_rows} rows to avoid memory issues")
+            df = df.sample(n=max_rows, random_state=42)
+            simplified_messages = [f"Dataset downsampled to {max_rows} rows due to size constraints"]
+        else:
+            simplified_messages = []
+
+        df, cleaning_messages = clean_and_validate_data(df)
         if df is None:
             logger.error("Failed to clean and validate data")
-            return None, messages
+            return None, cleaning_messages
         
+        simplified_messages.extend(cleaning_messages)
         logger.info(f"File parsed successfully: {df.shape}")
-        return df, messages
+        return df, simplified_messages
     except UnicodeDecodeError as e:
         logger.error(f"UnicodeDecodeError: {e}")
         return None, [f"Error decoding file: {str(e)}. Try saving the file with UTF-8 encoding."]
@@ -290,7 +311,7 @@ def generate_line_chart(df, selected_column, selected_y_axis, dark_mode, selecte
         logger.error(f"Line chart generation error: {e}")
         return px.scatter(title=f"Error: {str(e)}")
 
-# Analysis Functions (unchanged)
+# Analysis Functions (only updating generate_forecast)
 def generate_correlation_heatmap(df, dark_mode):
     numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
     if len(numerical_cols) < 2:
@@ -336,37 +357,55 @@ def generate_trend_chart(df, date_column, y_axis, dark_mode):
     fig.update_layout(title=f"Trend of {y_axis} Over Time")
     return fig
 
+# Updated generate_forecast function to handle missing date column and Y-axis issues
 def generate_forecast(df, date_column, y_axis, periods=30, dark_mode=True):
     try:
         logger.info("Generating forecast chart")
-        if not date_column or not y_axis or date_column not in df.columns or y_axis not in df.columns:
-            logger.error("Missing date column or Y-axis for forecasting")
-            return px.scatter(title="Select a date column and Y-axis for forecasting")
 
+        # Check for date column and Y-axis
+        if not date_column or date_column not in df.columns:
+            logger.error("No date column selected or available for forecasting")
+            return px.scatter(title="No date column selected. Please select a date column in the sidebar.")
+        
+        if not y_axis or y_axis not in df.columns:
+            logger.error("No Y-axis selected for forecasting")
+            return px.scatter(title="No Y-axis selected. Please select a numerical Y-axis in the sidebar.")
+
+        # Validate that Y-axis is numerical
+        if not pd.api.types.is_numeric_dtype(df[y_axis]):
+            logger.error(f"Y-axis '{y_axis}' is not numerical")
+            return px.scatter(title=f"Y-axis '{y_axis}' is not numerical. Please select a numerical column.")
+
+        # Convert date column to datetime
         df[date_column] = pd.to_datetime(df[date_column], errors='coerce')
         if df[date_column].isna().all():
             logger.error("All dates are invalid after conversion")
-            return px.scatter(title="Invalid date column format")
+            return px.scatter(title="Invalid date column format. Ensure the date column contains valid dates.")
 
+        # Prepare data for Prophet
         forecast_data = df[[date_column, y_axis]].rename(columns={date_column: 'ds', y_axis: 'y'})
         forecast_data = forecast_data.dropna()
         logger.info(f"Forecast data shape after dropping NaNs: {forecast_data.shape}")
 
         if len(forecast_data) < 2:
             logger.error("Not enough data for forecasting")
-            return px.scatter(title="Not enough data for forecasting")
+            return px.scatter(title="Not enough data for forecasting. Need at least 2 valid data points.")
 
+        # Check date range
         min_date = forecast_data['ds'].min()
         max_date = forecast_data['ds'].max()
         logger.info(f"Actual data date range: {min_date} to {max_date}")
 
+        # Aggregate data by date
         forecast_data = forecast_data.groupby('ds')['y'].sum().reset_index()
         logger.info(f"Forecast data shape after aggregation: {forecast_data.shape}")
 
+        # Split into train and test
         train_size = int(len(forecast_data) * 0.8)
         train_data = forecast_data[:train_size]
         test_data = forecast_data[train_size:]
 
+        # Initialize Prophet model
         model = Prophet(
             yearly_seasonality=True,
             weekly_seasonality=True,
@@ -376,10 +415,12 @@ def generate_forecast(df, date_column, y_axis, periods=30, dark_mode=True):
         )
         model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
 
+        # Add regressors if available
         regressors = [col for col in ['price', 'stock'] if col in df.columns]
         for regressor in regressors:
             model.add_regressor(regressor)
 
+        # Prepare training data with regressors
         train_data_with_regressors = df[[date_column, y_axis] + regressors].rename(columns={date_column: 'ds', y_axis: 'y'})
         train_data_with_regressors = train_data_with_regressors[train_data_with_regressors['ds'].isin(train_data['ds'])]
         train_data_with_regressors = train_data_with_regressors.groupby('ds').agg({
@@ -387,17 +428,21 @@ def generate_forecast(df, date_column, y_axis, periods=30, dark_mode=True):
             **{regressor: 'mean' for regressor in regressors}
         }).reset_index()
 
+        # Fit the model
         model.fit(train_data_with_regressors)
         logger.info("Prophet model fitted successfully")
 
+        # Create future dates for forecasting
         future = model.make_future_dataframe(periods=periods + len(test_data), freq='D')
         for regressor in regressors:
             future[regressor] = df[regressor].mean()
         logger.info(f"Future dates range: {future['ds'].min()} to {future['ds'].max()}")
 
+        # Generate forecast
         forecast = model.predict(future)
         logger.info("Forecast generated successfully")
 
+        # Calculate accuracy metrics
         test_forecast = forecast[forecast['ds'].isin(test_data['ds'])]
         test_actual = test_data['y'].values
         test_predicted = test_forecast['yhat'].values
@@ -406,6 +451,7 @@ def generate_forecast(df, date_column, y_axis, periods=30, dark_mode=True):
         mape = np.mean(np.abs((test_actual - test_predicted) / test_actual)) * 100
         accuracy_message = f"MAE: {mae:.2f}, RMSE: {rmse:.2f}, MAPE: {mape:.2f}%"
 
+        # Create the forecast plot
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=forecast_data['ds'], y=forecast_data['y'], mode='lines', name='Actual', line=dict(color='#1f77b4')))
         fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], mode='lines', name='Forecast', line=dict(color='#ff7f0e')))
@@ -614,7 +660,7 @@ app.layout = dbc.Container([
     ], className="min-vh-100")
 ], fluid=True, className="bg-gradient-dark")
 
-# Updated main callback to handle simplified cleaning messages
+# Main callback (updated to ensure downsampling and add logging)
 @app.callback(
     [Output('column-filter', 'options'),
      Output('value-filter', 'options'),
@@ -676,7 +722,8 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         if triggered_id == 'upload-data':
             if contents:
                 logger.info("Processing new upload")
-                df, messages = parse_contents(contents, filename)
+                # Ensure max_rows is explicitly passed
+                df, messages = parse_contents(contents, filename, max_rows=10000)
                 if df is not None:
                     data_store.df = df
                 else:
@@ -698,6 +745,10 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
 
         logger.info(f"DataFrame shape after loading: {df.shape}")
         logger.info(f"DataFrame columns: {df.columns.tolist()}")
+
+        # Log available date columns for debugging
+        datetime_cols = df.select_dtypes(include=['datetime']).columns.tolist()
+        logger.info(f"Available datetime columns: {datetime_cols}")
 
         row_comparison_message = ""
         if filename == "up sales 2017.csv":
@@ -741,7 +792,6 @@ def update_dashboard(contents, selected_column, selected_values, selected_y_axis
         if 'sales' in df_filtered.columns and pd.api.types.is_numeric_dtype(df_filtered['sales']):
             df_filtered['sales'] = df_filtered['sales'] * (1 + sales_adjust / 100)
         if 'price' in df_filtered.columns and 'sales' in df_filtered.columns:
-            # Ensure both columns are numeric before multiplication
             if pd.api.types.is_numeric_dtype(df_filtered['price']) and pd.api.types.is_numeric_dtype(df_filtered['sales']):
                 df_filtered['revenue'] = df_filtered['price'] * df_filtered['sales']
             else:
@@ -969,7 +1019,7 @@ def toggle_modal(main_click, pie_click, line_click, close_click, main_fig, pie_f
 # Download callback for filtered data (unchanged)
 @app.callback(
     Output("download-dataframe-csv", "data"),
-    Input("download-button", "n_clicks"),
+    Input("download-button", 'n_clicks'),
     prevent_initial_call=True
 )
 def download_data(n_clicks):
