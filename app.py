@@ -614,7 +614,6 @@ sidebar = dbc.Col([
             html.Div(id='upload-message', className="mb-3 text-center text-light"),
             html.H5("Data Analysis", className="card-title text-light mt-3"),
             dcc.Dropdown(id='analysis-x-axis', placeholder="Select X-axis", className="mb-3 dropdown-purple"),
-            dcc.Dropdown(id='analysis-value-filter', placeholder="Select values to filter (X-axis)", value=[], multi=True, className="mb-3 dropdown-purple"),
             dcc.Dropdown(id='analysis-y-axis', placeholder="Select Y-axis (Multiple)", multi=True, className="mb-3 dropdown-purple"),
             dcc.Dropdown(id='chart-type', options=[
                 {'label': 'Bar Chart', 'value': 'bar'},
@@ -764,30 +763,45 @@ app.layout = dbc.Container([
      Output('cleaning-message', 'children'),
      Output('filtered-data', 'data'),
      Output('data-table', 'data'),
-     Output('data-table', 'columns')],
+     Output('data-table', 'columns'),
+     Output('analysis-x-axis', 'value', allow_duplicate=True),
+     Output('analysis-y-axis', 'value', allow_duplicate=True)],
     [Input('upload-data', 'contents')],
     [State('upload-data', 'filename')]
 )
 def update_dropdowns(contents, filename):
     if contents is None:
-        return [], [], [], [], [], [], [], [], [], [], "Please upload a file", "", None, [], []
-    
+        return [], [], [], [], [], [], [], [], [], [], "Please upload a file", "", None, [], [], None, []
+
     df, messages = parse_contents(contents, filename)
     if df is None:
-        return [], [], [], [], [], [], [], [], [], [], messages, "", None, [], []
-    
+        return [], [], [], [], [], [], [], [], [], [], messages, "", None, [], [], None, []
+
     data_store.df = df
     data_store.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+
     columns = [{'label': col, 'value': col} for col in df.columns]
     numerical_cols = [{'label': col, 'value': col} for col in df.select_dtypes(include=['number']).columns]
     datetime_cols = [{'label': col, 'value': col} for col in df.select_dtypes(include=['datetime']).columns]
-    
+
     table_columns = [{"name": col, "id": col} for col in df.columns]
     table_data = df.to_dict('records')
-    
+
+    # Set default X-axis: prefer categorical or datetime, otherwise first column
+    categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
+    if categorical_cols:
+        default_x_axis = categorical_cols[0]
+    elif datetime_cols:
+        default_x_axis = datetime_cols[0]['value']
+    else:
+        default_x_axis = df.columns[0]
+
+    # Set default Y-axis: first numerical column (since default chart is bar)
+    default_y_axis = numerical_cols[0]['value'] if numerical_cols else None
+
     return (columns, columns, datetime_cols, numerical_cols, columns, numerical_cols, numerical_cols,
-            columns, columns, numerical_cols, f"File {filename} uploaded successfully", messages, df.to_dict('records'), table_data, table_columns)
+            columns, columns, numerical_cols, f"File {filename} uploaded successfully", messages,
+            df.to_dict('records'), table_data, table_columns, default_x_axis, [default_y_axis] if default_y_axis else [])
 
 @app.callback(
     Output('value-filter', 'options'),
@@ -804,20 +818,6 @@ def update_value_filter(column, data):
     return [{'label': str(val), 'value': str(val)} for val in unique_values]
 
 @app.callback(
-    Output('analysis-value-filter', 'options'),
-    [Input('analysis-x-axis', 'value')],
-    [State('filtered-data', 'data')]
-)
-def update_analysis_value_filter(x_axis, data):
-    if not x_axis or not data:
-        return []
-    df = pd.DataFrame(data)
-    if x_axis not in df.columns:
-        return []
-    unique_values = df[x_axis].dropna().unique()
-    return [{'label': str(val), 'value': str(val)} for val in unique_values]
-
-@app.callback(
     [Output('kpi-cards', 'children'),
      Output('smart-insights', 'children'),
      Output('filtered-data', 'data', allow_duplicate=True),
@@ -825,13 +825,12 @@ def update_analysis_value_filter(x_axis, data):
     [Input('filtered-data', 'data'),
      Input('value-filter', 'value'),
      Input('column-filter', 'value'),
-     Input('analysis-value-filter', 'value'),
      Input('analysis-x-axis', 'value'),
      Input('what-if-column', 'value'),
      Input('what-if-adjust', 'value')],
     prevent_initial_call=True
 )
-def update_kpi_and_insights(data, filter_values, filter_column, analysis_filter_values, analysis_x_axis, what_if_column, what_if_adjust):
+def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis, what_if_column, what_if_adjust):
     if not data:
         return [], ["Please upload data to see insights"], None, []
     
@@ -845,25 +844,6 @@ def update_kpi_and_insights(data, filter_values, filter_column, analysis_filter_
         logger.info(f"After column filter ({filter_column} in {filter_values}): DataFrame shape: {df.shape}")
         if df.empty:
             return [], ["No data available after filtering"], None, []
-    
-    # Apply analysis filter (e.g., Engine Type filter)
-    if analysis_x_axis and analysis_filter_values:
-        # Ensure the column and filter values are strings, lowercased, and stripped
-        df[analysis_x_axis] = df[analysis_x_axis].astype(str).str.lower().str.strip()
-        analysis_filter_values = [str(val).lower().strip() for val in analysis_filter_values]
-        logger.info(f"Filter values after lowercasing: {analysis_filter_values}")
-        
-        # Log the DataFrame's values for debugging
-        logger.info(f"DataFrame {analysis_x_axis} values before filtering: {df[analysis_x_axis].unique()}")
-        
-        # Apply the filter
-        df = df[df[analysis_x_axis].isin(analysis_filter_values)]
-        logger.info(f"After analysis filter ({analysis_x_axis} in {analysis_filter_values}): DataFrame shape: {df.shape}")
-        logger.info(f"Filtered unique values in {analysis_x_axis}: {df[analysis_x_axis].unique()}")
-        
-        if df.empty:
-            logger.warning("Filtered DataFrame is empty after applying analysis filter")
-            return [], ["No data available after filtering. Check if the selected values exist in the dataset."], None, []
     
     # Apply what-if analysis (if any)
     if what_if_column and what_if_adjust:
@@ -1041,7 +1021,6 @@ def download_prediction_charts(n_clicks, trend_fig, forecast_fig, feature_fig):
      Output('chart-type', 'value'),
      Output('column-filter', 'value'),
      Output('value-filter', 'value'),
-     Output('analysis-value-filter', 'value'),
      Output('what-if-column', 'value'),
      Output('what-if-adjust', 'value'),
      Output('scenario-column', 'value'),
@@ -1050,7 +1029,7 @@ def download_prediction_charts(n_clicks, trend_fig, forecast_fig, feature_fig):
 )
 def clear_selection(n_clicks):
     if n_clicks:
-        return None, [], 'bar', None, [], [], None, 0, None, 0
+        return None, [], 'bar', None, [], None, 0, None, 0
     return dash.no_update
 
 @app.callback(
@@ -1082,7 +1061,7 @@ def update_recommendations(data):
 
 @app.callback(
     Output('download-recommendations', 'data'),
-    [Input('export-recommendations', 'n_clicks')],
+    [Input('export-recommendations', "n_clicks")],
     [State('ai-recommendations', 'children')],
     prevent_initial_call=True
 )
