@@ -767,7 +767,8 @@ app.layout = dbc.Container([
      Output('analysis-x-axis', 'value', allow_duplicate=True),
      Output('analysis-y-axis', 'value', allow_duplicate=True)],
     [Input('upload-data', 'contents')],
-    [State('upload-data', 'filename')]
+    [State('upload-data', 'filename')],
+    prevent_initial_call=True
 )
 def update_dropdowns(contents, filename):
     if contents is None:
