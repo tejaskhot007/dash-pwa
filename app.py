@@ -196,7 +196,6 @@ def generate_main_chart(df, x_axis, y_axes, chart_type, dark_mode, selected_cate
         template = 'plotly_dark' if dark_mode else 'plotly'
 
         if chart_type == 'bar':
-            # Group by x_axis and aggregate Y-axes (e.g., sum or mean)
             grouped_df = df.groupby(x_axis)[y_axes].sum().reset_index()
             logger.info(f"Grouped DataFrame for bar chart:\n{grouped_df}")
             fig = go.Figure()
@@ -293,7 +292,7 @@ def generate_pie_chart(df, names_col, dark_mode, selected_category):
         return fig
     except Exception as e:
         logger.error(f"Pie chart error: {e}")
-        return px.scatter(title="Error generating pie chart")
+        return px.scatter(title=f"Error generating pie chart: {str(e)}")
 
 @cache
 def generate_line_chart(df, x_axis, y_axis, dark_mode, selected_category):
@@ -308,7 +307,7 @@ def generate_line_chart(df, x_axis, y_axis, dark_mode, selected_category):
         return fig
     except Exception as e:
         logger.error(f"Line chart error: {e}")
-        return px.scatter(title="Error generating line chart")
+        return px.scatter(title=f"Error generating line chart: {str(e)}")
 
 @cache
 def generate_correlation_heatmap(df, dark_mode):
@@ -324,7 +323,7 @@ def generate_correlation_heatmap(df, dark_mode):
         return fig
     except Exception as e:
         logger.error(f"Correlation heatmap error: {e}")
-        return px.scatter(title="Error generating correlation heatmap")
+        return px.scatter(title=f"Error generating correlation heatmap: {str(e)}")
 
 @cache
 def generate_trend_chart(df, x_axis, y_axis, dark_mode):
@@ -342,7 +341,7 @@ def generate_trend_chart(df, x_axis, y_axis, dark_mode):
         return fig
     except Exception as e:
         logger.error(f"Trend chart error: {e}")
-        return px.scatter(title="Error generating trend chart")
+        return px.scatter(title=f"Error generating trend chart: {str(e)}")
 
 @cache
 def generate_forecast(df, x_axis, y_axis, periods=30, dark_mode=True):
@@ -396,7 +395,7 @@ def generate_forecast(df, x_axis, y_axis, periods=30, dark_mode=True):
         fig.update_layout(title=f"Forecast of {y_axis} for Next {periods} Days ({accuracy_message})", template='plotly_dark' if dark_mode else 'plotly', xaxis_title="Date", yaxis_title=y_axis, hovermode='x unified')
         return fig
     except Exception as e:
-        logger.error(f"Forecast error: {str(e)}")
+        logger.error(f"Forecast error: {e}")
         return px.scatter(title=f"Error in forecasting: {str(e)}")
 
 @cache
@@ -420,7 +419,7 @@ def generate_feature_importance(df, x_axis, y_axis, dark_mode):
         return fig
     except Exception as e:
         logger.error(f"Feature importance error: {e}")
-        return px.scatter(title="Error generating feature importance")
+        return px.scatter(title=f"Error generating feature importance: {str(e)}")
 
 @cache
 def generate_smart_insights(df):
@@ -483,7 +482,7 @@ def generate_kpi_cards(df):
         return kpi_cards
     except Exception as e:
         logger.error(f"KPI cards error: {e}")
-        return [dbc.Col(html.P("Error generating KPI cards", className="text-danger"), width=12)]
+        return [dbc.Col(html.P(f"Error generating KPI cards: {str(e)}", className="text-danger"), width=12)]
 
 def perform_scenario_analysis(df, scenario_column, scenario_adjustment):
     try:
@@ -614,6 +613,7 @@ sidebar = dbc.Col([
             html.Div(id='upload-message', className="mb-3 text-center text-light"),
             html.H5("Data Analysis", className="card-title text-light mt-3"),
             dcc.Dropdown(id='analysis-x-axis', placeholder="Select X-axis", className="mb-3 dropdown-purple"),
+            dcc.Dropdown(id='x-axis-filter-values', placeholder="Select X-axis filter values", value=[], multi=True, className="mb-3 dropdown-purple"),
             dcc.Dropdown(id='analysis-y-axis', placeholder="Select Y-axis (Multiple)", multi=True, className="mb-3 dropdown-purple"),
             dcc.Dropdown(id='chart-type', options=[
                 {'label': 'Bar Chart', 'value': 'bar'},
@@ -788,7 +788,6 @@ def update_dropdowns(contents, filename):
     table_columns = [{"name": col, "id": col} for col in df.columns]
     table_data = df.to_dict('records')
 
-    # Set default X-axis: prefer categorical or datetime, otherwise first column
     categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
     if categorical_cols:
         default_x_axis = categorical_cols[0]
@@ -797,7 +796,6 @@ def update_dropdowns(contents, filename):
     else:
         default_x_axis = df.columns[0]
 
-    # Set default Y-axis: first numerical column (since default chart is bar)
     default_y_axis = numerical_cols[0]['value'] if numerical_cols else None
 
     return (columns, columns, datetime_cols, numerical_cols, columns, numerical_cols, numerical_cols,
@@ -819,6 +817,20 @@ def update_value_filter(column, data):
     return [{'label': str(val), 'value': str(val)} for val in unique_values]
 
 @app.callback(
+    Output('x-axis-filter-values', 'options'),
+    [Input('analysis-x-axis', 'value')],
+    [State('filtered-data', 'data')]
+)
+def update_x_axis_filter_values(x_axis, data):
+    if not x_axis or not data:
+        return []
+    df = pd.DataFrame(data)
+    if x_axis not in df.columns:
+        return []
+    unique_values = df[x_axis].dropna().unique()
+    return [{'label': str(val), 'value': str(val)} for val in unique_values]
+
+@app.callback(
     [Output('kpi-cards', 'children'),
      Output('smart-insights', 'children'),
      Output('filtered-data', 'data', allow_duplicate=True),
@@ -828,35 +840,47 @@ def update_value_filter(column, data):
      Input('column-filter', 'value'),
      Input('analysis-x-axis', 'value'),
      Input('what-if-column', 'value'),
-     Input('what-if-adjust', 'value')],
+     Input('what-if-adjust', 'value'),
+     Input('x-axis-filter-values', 'value')],
     prevent_initial_call=True
 )
-def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis, what_if_column, what_if_adjust):
+def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis, what_if_column, what_if_adjust, x_axis_filter_values):
     if not data:
         return [], ["Please upload data to see insights"], None, []
     
-    df = pd.DataFrame(data)
-    logger.info(f"Initial DataFrame shape: {df.shape}")
-    logger.info(f"Initial unique values in {analysis_x_axis}: {df[analysis_x_axis].unique() if analysis_x_axis in df.columns else 'N/A'}")
-    
-    # Apply column filter (if any)
-    if filter_column and filter_values:
-        df = df[df[filter_column].isin(filter_values)]
-        logger.info(f"After column filter ({filter_column} in {filter_values}): DataFrame shape: {df.shape}")
-        if df.empty:
-            return [], ["No data available after filtering"], None, []
-    
-    # Apply what-if analysis (if any)
-    if what_if_column and what_if_adjust:
-        if what_if_column in df.columns and pd.api.types.is_numeric_dtype(df[what_if_column]):
-            df[what_if_column] = df[what_if_column] * (1 + what_if_adjust / 100)
-    
-    data_store.filtered_df = df
-    kpi_cards = generate_kpi_cards(df)
-    smart_insights = generate_smart_insights(df)
-    table_data = df.to_dict('records')
-    logger.info(f"Final filtered DataFrame shape: {df.shape}")
-    return kpi_cards, smart_insights, df.to_dict('records'), table_data
+    try:
+        df = pd.DataFrame(data)
+        logger.info(f"Initial DataFrame shape: {df.shape}")
+        logger.info(f"Initial unique values in {analysis_x_axis}: {df[analysis_x_axis].unique() if analysis_x_axis in df.columns else 'N/A'}")
+        
+        # Apply column filter (if any)
+        if filter_column and filter_values:
+            df = df[df[filter_column].isin(filter_values)]
+            logger.info(f"After column filter ({filter_column} in {filter_values}): DataFrame shape: {df.shape}")
+            if df.empty:
+                return [], ["No data available after filtering"], None, []
+        
+        # Apply X-axis filter (if any)
+        if analysis_x_axis and x_axis_filter_values and analysis_x_axis in df.columns:
+            df = df[df[analysis_x_axis].isin(x_axis_filter_values)]
+            logger.info(f"After X-axis filter ({analysis_x_axis} in {x_axis_filter_values}): DataFrame shape: {df.shape}")
+            if df.empty:
+                return [], ["No data available after X-axis filtering"], None, []
+        
+        # Apply what-if analysis (if any)
+        if what_if_column and what_if_adjust and what_if_column in df.columns:
+            if pd.api.types.is_numeric_dtype(df[what_if_column]):
+                df[what_if_column] = df[what_if_column] * (1 + what_if_adjust / 100)
+        
+        data_store.filtered_df = df
+        kpi_cards = generate_kpi_cards(df)
+        smart_insights = generate_smart_insights(df)
+        table_data = df.to_dict('records')
+        logger.info(f"Final filtered DataFrame shape: {df.shape}")
+        return kpi_cards, smart_insights, df.to_dict('records'), table_data
+    except Exception as e:
+        logger.error(f"Error in update_kpi_and_insights: {str(e)}")
+        return [], [f"Error processing data: {str(e)}"], None, []
 
 @app.callback(
     [Output('main-chart', 'figure'),
@@ -880,41 +904,46 @@ def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis,
      Input('line-y-axis', 'value')]
 )
 def update_charts(active_tab, data, x_axis, y_axes, chart_type, dark_mode, selected_category, pred_x_axis, pred_y_axis, pie_names_col, line_x_axis, line_y_axis):
+    empty_fig = px.scatter(title="Please upload data")
     if not data:
-        empty_fig = px.scatter(title="Please upload data")
         return empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, empty_fig
     
-    df = pd.DataFrame(data)
-    if df.empty:
-        empty_fig = px.scatter(title="No data available")
-        return empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, empty_fig
-    
-    main_fig = px.scatter(title="Select X and Y axes")
-    pie_fig = px.scatter(title="Select a column for the Pie Chart")
-    line_fig = px.scatter(title="Select X and Y axes for the Line Chart")
-    heatmap_fig = px.scatter(title="Select numerical columns")
-    trend_fig = px.scatter(title="Select a date column for trends")
-    forecast_fig = px.scatter(title="Select a date and numerical column for forecasting")
-    feature_fig = px.scatter(title="Select a numerical Y-axis for feature importance")
-    
-    if active_tab == "main-tab":
-        main_fig = generate_main_chart(df, x_axis, y_axes if y_axes else [], chart_type, dark_mode, selected_category)
-    elif active_tab == "pie-tab":
-        pie_fig = generate_pie_chart(df, pie_names_col, dark_mode, selected_category)
-    elif active_tab == "line-tab":
-        line_fig = generate_line_chart(df, line_x_axis, line_y_axis, dark_mode, selected_category)
-    elif active_tab == "correlation-tab":
-        heatmap_fig = generate_correlation_heatmap(df, dark_mode)
-    elif active_tab == "trends-tab":
-        y_axis = y_axes[0] if y_axes else None
-        trend_fig = generate_trend_chart(df, x_axis, y_axis, dark_mode)
-    elif active_tab == "forecast-tab":
-        forecast_fig = generate_forecast(df, pred_x_axis, pred_y_axis, dark_mode=dark_mode)
-    elif active_tab == "feature-importance-tab":
-        y_axis = y_axes[0] if y_axes else None
-        feature_fig = generate_feature_importance(df, x_axis, y_axis, dark_mode)
-    
-    return main_fig, pie_fig, line_fig, heatmap_fig, trend_fig, forecast_fig, feature_fig
+    try:
+        df = pd.DataFrame(data)
+        if df.empty or df is None:
+            empty_fig = px.scatter(title="No data available")
+            return empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, empty_fig
+        
+        main_fig = px.scatter(title="Select X and Y axes")
+        pie_fig = px.scatter(title="Select a column for the Pie Chart")
+        line_fig = px.scatter(title="Select X and Y axes for the Line Chart")
+        heatmap_fig = px.scatter(title="Select numerical columns")
+        trend_fig = px.scatter(title="Select a date column for trends")
+        forecast_fig = px.scatter(title="Select a date and numerical column for forecasting")
+        feature_fig = px.scatter(title="Select a numerical Y-axis for feature importance")
+        
+        if active_tab == "main-tab" and x_axis and y_axes:
+            main_fig = generate_main_chart(df, x_axis, y_axes if y_axes else [], chart_type, dark_mode, selected_category)
+        elif active_tab == "pie-tab" and pie_names_col:
+            pie_fig = generate_pie_chart(df, pie_names_col, dark_mode, selected_category)
+        elif active_tab == "line-tab" and line_x_axis and line_y_axis:
+            line_fig = generate_line_chart(df, line_x_axis, line_y_axis, dark_mode, selected_category)
+        elif active_tab == "correlation-tab":
+            heatmap_fig = generate_correlation_heatmap(df, dark_mode)
+        elif active_tab == "trends-tab" and x_axis and y_axes:
+            y_axis = y_axes[0] if y_axes else None
+            trend_fig = generate_trend_chart(df, x_axis, y_axis, dark_mode)
+        elif active_tab == "forecast-tab" and pred_x_axis and pred_y_axis:
+            forecast_fig = generate_forecast(df, pred_x_axis, pred_y_axis, dark_mode=dark_mode)
+        elif active_tab == "feature-importance-tab" and y_axes:
+            y_axis = y_axes[0] if y_axes else None
+            feature_fig = generate_feature_importance(df, x_axis, y_axis, dark_mode)
+        
+        return main_fig, pie_fig, line_fig, heatmap_fig, trend_fig, forecast_fig, feature_fig
+    except Exception as e:
+        logger.error(f"Error in update_charts: {str(e)}")
+        error_fig = px.scatter(title=f"Chart update error: {str(e)}")
+        return error_fig, error_fig, error_fig, error_fig, error_fig, error_fig, error_fig
 
 @app.callback(
     Output('selected-category', 'data'),
@@ -1025,12 +1054,13 @@ def download_prediction_charts(n_clicks, trend_fig, forecast_fig, feature_fig):
      Output('what-if-column', 'value'),
      Output('what-if-adjust', 'value'),
      Output('scenario-column', 'value'),
-     Output('scenario-adjust', 'value')],
+     Output('scenario-adjust', 'value'),
+     Output('x-axis-filter-values', 'value')],
     [Input('clear-selection', 'n_clicks')]
 )
 def clear_selection(n_clicks):
     if n_clicks:
-        return None, [], 'bar', None, [], None, 0, None, 0
+        return None, [], 'bar', None, [], None, 0, None, 0, []
     return dash.no_update
 
 @app.callback(
