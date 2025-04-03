@@ -197,7 +197,7 @@ def generate_main_chart(df, x_axis, y_axes, chart_type, dark_mode, selected_cate
 
         if chart_type == 'bar':
             grouped_df = df.groupby(x_axis)[y_axes].sum().reset_index()
-            logger.info(f"Grouped DataFrame for bar chart:\n{grouped_df}")
+            logger.info(f"Grouped DataFrame for toolbar chart:\n{grouped_df}")
             fig = go.Figure()
             for y_axis in y_axes:
                 fig.add_trace(go.Bar(x=grouped_df[x_axis], y=grouped_df[y_axis], name=y_axis))
@@ -422,29 +422,44 @@ def generate_feature_importance(df, x_axis, y_axis, dark_mode):
         return px.scatter(title=f"Error generating feature importance: {str(e)}")
 
 @cache
-def generate_smart_insights(df):
+def generate_smart_insights(df, y_axis=None):
     try:
         insights = []
-        numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
         categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
         datetime_cols = df.select_dtypes(include=['datetime']).columns.tolist()
+        
+        # If a specific Y-axis is provided and it exists in the DataFrame, use it; otherwise fall back to default behavior
+        if y_axis and y_axis in df.columns and pd.api.types.is_numeric_dtype(df[y_axis]):
+            num_col = y_axis
+        else:
+            # Default behavior: look for a numerical column related to revenue, sales, or amount
+            numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
+            num_col = next((col for col in numerical_cols if any(k in col.lower() for k in ['revenue', 'sales', 'amount'])), None)
+            if not num_col and numerical_cols:
+                num_col = numerical_cols[0]  # Fallback to first numerical column if no specific match
+        
+        if not num_col:
+            return ["No suitable numerical column found for insights"]
+
+        # Generate insights based on categorical columns and the selected/target numerical column
         for cat_col in categorical_cols:
-            for num_col in numerical_cols:
-                if any(k in num_col.lower() for k in ['revenue', 'sales', 'amount']):
-                    top_performers = df.groupby(cat_col)[num_col].sum().sort_values(ascending=False).head(3)
-                    insights.append(html.P(f"🔹 Top 3 {cat_col} by {num_col}:", className="text-light"))
-                    insights.append(html.Ul([html.Li(f"{idx}: {val:.2f}") for idx, val in top_performers.items()], className="text-light"))
+            if cat_col in df.columns and num_col in df.columns:
+                top_performers = df.groupby(cat_col)[num_col].sum().sort_values(ascending=False).head(3)
+                insights.append(html.P(f"🔹 Top 3 {cat_col} by {num_col}:", className="text-light"))
+                insights.append(html.Ul([html.Li(f"{idx}: {val:.2f}") for idx, val in top_performers.items()], className="text-light"))
+
+        # Generate time-based insights if datetime columns exist
         if datetime_cols:
             date_col = datetime_cols[0]
-            for num_col in numerical_cols:
-                if any(k in num_col.lower() for k in ['revenue', 'sales', 'amount']):
-                    df['month'] = df[date_col].dt.month
-                    monthly_trend = df.groupby('month')[num_col].sum()
-                    max_month = monthly_trend.idxmax()
-                    min_month = monthly_trend.idxmin()
-                    insights.append(html.P(f"🔹 {num_col} Trend:", className="text-light"))
-                    insights.append(html.P(f"Highest in month {max_month}: {monthly_trend[max_month]:.2f}", className="text-light"))
-                    insights.append(html.P(f"Lowest in month {min_month}: {monthly_trend[min_month]:.2f}", className="text-light"))
+            if date_col in df.columns and num_col in df.columns:
+                df['month'] = df[date_col].dt.month
+                monthly_trend = df.groupby('month')[num_col].sum()
+                max_month = monthly_trend.idxmax()
+                min_month = monthly_trend.idxmin()
+                insights.append(html.P(f"🔹 {num_col} Trend:", className="text-light"))
+                insights.append(html.P(f"Highest in month {max_month}: {monthly_trend[max_month]:.2f}", className="text-light"))
+                insights.append(html.P(f"Lowest in month {min_month}: {monthly_trend[min_month]:.2f}", className="text-light"))
+
         return insights if insights else ["No smart insights available"]
     except Exception as e:
         logger.error(f"Smart insights error: {e}")
@@ -841,10 +856,11 @@ def update_x_axis_filter_values(x_axis, data):
      Input('analysis-x-axis', 'value'),
      Input('what-if-column', 'value'),
      Input('what-if-adjust', 'value'),
-     Input('x-axis-filter-values', 'value')],
+     Input('x-axis-filter-values', 'value'),
+     Input('analysis-y-axis', 'value')],  # Added analysis-y-axis as input
     prevent_initial_call=True
 )
-def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis, what_if_column, what_if_adjust, x_axis_filter_values):
+def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis, what_if_column, what_if_adjust, x_axis_filter_values, y_axes):
     if not data:
         return [], ["Please upload data to see insights"], None, []
     
@@ -874,7 +890,9 @@ def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis,
         
         data_store.filtered_df = df
         kpi_cards = generate_kpi_cards(df)
-        smart_insights = generate_smart_insights(df)
+        # Pass the first selected Y-axis (if any) to generate_smart_insights
+        y_axis = y_axes[0] if y_axes else None
+        smart_insights = generate_smart_insights(df, y_axis)
         table_data = df.to_dict('records')
         logger.info(f"Final filtered DataFrame shape: {df.shape}")
         return kpi_cards, smart_insights, df.to_dict('records'), table_data
