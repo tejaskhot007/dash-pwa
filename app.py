@@ -1,4 +1,3 @@
-
 import base64
 import io
 import logging
@@ -28,6 +27,17 @@ import plotly.io as pio
 import requests
 from textblob import TextBlob
 import holidays
+import nltk
+
+# Download required NLTK data
+try:
+    nltk.data.find('corpora/wordnet')
+except LookupError:
+    nltk.download('wordnet')
+try:
+    nltk.data.find('corpora/punkt')
+except LookupError:
+    nltk.download('punkt')
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO)
@@ -345,7 +355,7 @@ def generate_trend_chart(df, x_axis, y_axis, dark_mode):
         return px.scatter(title=f"Error generating trend chart: {str(e)}")
 
 @cache
-def generate_forecast(df, x_axis, y_axis, periods=30, dark_mode=True):
+def generate_forecast(df, x_axis, y_axis, periods=30, dark_mode=True, country='US'):
     try:
         if not x_axis or x_axis not in df.columns:
             return px.scatter(title="Please select a valid date column for X-axis")
@@ -353,85 +363,29 @@ def generate_forecast(df, x_axis, y_axis, periods=30, dark_mode=True):
             return px.scatter(title="Please select a valid numerical column for Y-axis")
         if not pd.api.types.is_numeric_dtype(df[y_axis]):
             return px.scatter(title=f"Y-axis '{y_axis}' is not numerical")
-
         df[x_axis] = pd.to_datetime(df[x_axis], errors='coerce')
         if df[x_axis].isna().all():
             return px.scatter(title="Invalid date column format")
-
         forecast_data = df[[x_axis, y_axis]].rename(columns={x_axis: 'ds', y_axis: 'y'}).dropna()
-        if len(forecast_data) < 10:
-            return px.scatter(title="Not enough data for forecasting (need at least 10 samples)")
-
+        if len(forecast_data) < 2:
+            return px.scatter(title="Not enough data for forecasting")
         forecast_data = forecast_data.groupby('ds')['y'].sum().reset_index()
 
-        forecast_data['last_year_date'] = forecast_data['ds'].apply(
-            lambda x: x - pd.Timedelta(days=365)
-        )
-        forecast_data = forecast_data.merge(
-            forecast_data[['ds', 'y']].rename(columns={'ds': 'last_year_date', 'y': 'last_year_y'}),
-            how='left', on='last_year_date'
-        )
-        forecast_data['last_year_y'] = forecast_data['last_year_y'].fillna(forecast_data['last_year_y'].mean())
-
-        forecast_data['month'] = forecast_data['ds'].dt.month
-        forecast_data['temperature'] = forecast_data['month'].map({
-            1: 5, 2: 7, 3: 10, 4: 15, 5: 20, 6: 25, 7: 28, 8: 27, 9: 22, 10: 15, 11: 10, 12: 6
-        })
-
-        text_col = next((col for col in df.columns if 'comment' in col.lower() or 'review' in col.lower()), None)
-        if text_col:
-            df['sentiment'] = df[text_col].apply(
-                lambda x: TextBlob(str(x)).sentiment.polarity if pd.notna(x) else 0
-            )
-            sentiment_data = df[[x_axis, 'sentiment']].rename(columns={x_axis: 'ds'})
-            sentiment_data = sentiment_data.groupby('ds')['sentiment'].mean().reset_index()
-            forecast_data = forecast_data.merge(sentiment_data, on='ds', how='left')
-            forecast_data['sentiment'] = forecast_data['sentiment'].fillna(0)
-
-        us_holidays = holidays.US(years=range(forecast_data['ds'].dt.year.min(), forecast_data['ds'].dt.year.max() + 1))
-        forecast_data['is_holiday'] = forecast_data['ds'].apply(lambda x: 1 if x in us_holidays else 0)
+        # Add holidays as regressors
+        us_holidays = holidays.country_holidays(country)
+        forecast_data['holiday'] = forecast_data['ds'].apply(lambda x: us_holidays.get(x))
+        forecast_data['holiday'] = forecast_data['holiday'].fillna(0).astype(int)
 
         train_size = int(len(forecast_data) * 0.8)
         train_data = forecast_data[:train_size]
         test_data = forecast_data[train_size:]
-
-        model = Prophet(
-            yearly_seasonality=True,
-            weekly_seasonality=True,
-            daily_seasonality=True,
-            changepoint_prior_scale=0.01,
-            seasonality_prior_scale=5.0,
-            seasonality_mode='multiplicative'
-        )
-        model.add_seasonality(name='monthly', period=30.5, fourier_order=8)
-
-        regressors = ['last_year_y', 'temperature', 'is_holiday']
-        if 'sentiment' in forecast_data.columns:
-            regressors.append('sentiment')
-        for regressor in regressors:
-            model.add_regressor(regressor, prior_scale=0.5, mode='multiplicative')
-
-        train_data_with_regressors = train_data[['ds', 'y'] + regressors]
-
-        model.fit(train_data_with_regressors)
-
+        model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=True, changepoint_prior_scale=0.05, seasonality_prior_scale=10.0)
+        model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+        model.add_regressor('holiday')
+        model.fit(train_data)
         future = model.make_future_dataframe(periods=periods + len(test_data), freq='D')
-        future['month'] = future['ds'].dt.month
-        future['temperature'] = future['month'].map({
-            1: 5, 2: 7, 3: 10, 4: 15, 5: 20, 6: 25, 7: 28, 8: 27, 9: 22, 10: 15, 11: 10, 12: 6
-        })
-        future['is_holiday'] = future['ds'].apply(lambda x: 1 if x in us_holidays else 0)
-        future['last_year_date'] = future['ds'].apply(lambda x: x - pd.Timedelta(days=365))
-        future = future.merge(
-            forecast_data[['ds', 'last_year_y']].rename(columns={'ds': 'last_year_date'}),
-            how='left', on='last_year_date'
-        )
-        future['last_year_y'] = future['last_year_y'].fillna(forecast_data['last_year_y'].mean())
-        if 'sentiment' in forecast_data.columns:
-            future['sentiment'] = forecast_data['sentiment'].mean()
-
+        future['holiday'] = future['ds'].apply(lambda x: us_holidays.get(x)).fillna(0).astype(int)
         forecast = model.predict(future)
-
         test_forecast = forecast[forecast['ds'].isin(test_data['ds'])]
         test_actual = test_data['y'].values
         test_predicted = test_forecast['yhat'].values
@@ -439,19 +393,12 @@ def generate_forecast(df, x_axis, y_axis, periods=30, dark_mode=True):
         rmse = np.sqrt(mean_squared_error(test_actual, test_predicted))
         mape = np.mean(np.abs((test_actual - test_predicted) / test_actual)) * 100
         accuracy_message = f"MAE: {mae:.2f}, RMSE: {rmse:.2f}, MAPE: {mape:.2f}%"
-
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=forecast_data['ds'], y=forecast_data['y'], mode='lines', name='Actual', line=dict(color='#1f77b4')))
         fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], mode='lines', name='Forecast', line=dict(color='#ff7f0e')))
         fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_lower'], fill=None, mode='lines', line=dict(color='rgba(0,0,0,0)'), showlegend=False))
         fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_upper'], fill='tonexty', mode='lines', line=dict(color='rgba(0,0,0,0)'), name='Confidence Interval'))
-        fig.update_layout(
-            title=f"Forecast of {y_axis} for Next {periods} Days ({accuracy_message})",
-            template='plotly_dark' if dark_mode else 'plotly',
-            xaxis_title="Date",
-            yaxis_title=y_axis,
-            hovermode='x unified'
-        )
+        fig.update_layout(title=f"Forecast of {y_axis} for Next {periods} Days ({accuracy_message})", template='plotly_dark' if dark_mode else 'plotly', xaxis_title="Date", yaxis_title=y_axis, hovermode='x unified')
         return fig
     except Exception as e:
         logger.error(f"Forecast error: {e}")
@@ -498,12 +445,14 @@ def generate_smart_insights(df, y_axis=None):
         if not num_col:
             return ["No suitable numerical column found for insights"]
 
+        # Existing categorical insights
         for cat_col in categorical_cols:
             if cat_col in df.columns and num_col in df.columns:
                 top_performers = df.groupby(cat_col)[num_col].sum().sort_values(ascending=False).head(3)
                 insights.append(html.P(f"🔹 Top 3 {cat_col} by {num_col}:", className="text-light"))
                 insights.append(html.Ul([html.Li(f"{idx}: {val:.2f}") for idx, val in top_performers.items()], className="text-light"))
 
+        # Time-based insights with holiday impact
         if datetime_cols:
             date_col = datetime_cols[0]
             if date_col in df.columns and num_col in df.columns:
@@ -511,9 +460,23 @@ def generate_smart_insights(df, y_axis=None):
                 monthly_trend = df.groupby('month')[num_col].sum()
                 max_month = monthly_trend.idxmax()
                 min_month = monthly_trend.idxmin()
-                insights.append(html.P(f"🔹 {num_col} Trend:", className="text-light"))
-                insights.append(html.P(f"Highest in month {max_month}: {monthly_trend[max_month]:.2f}", className="text-light"))
-                insights.append(html.P(f"Lowest in month {min_month}: {monthly_trend[min_month]:.2f}", className="text-light"))
+                us_holidays = holidays.country_holidays('US')
+                holiday_dates = df[df[date_col].isin(us_holidays)].copy()
+                if not holiday_dates.empty:
+                    holiday_impact = holiday_dates[num_col].sum() / df[num_col].sum() * 100
+                    insights.append(html.P(f"🔹 {num_col} Trend:", className="text-light"))
+                    insights.append(html.P(f"Highest in month {max_month}: {monthly_trend[max_month]:.2f}", className="text-light"))
+                    insights.append(html.P(f"Lowest in month {min_month}: {monthly_trend[min_month]:.2f}", className="text-light"))
+                    insights.append(html.P(f"Holiday Impact: {holiday_impact:.2f}% of total {num_col}", className="text-light"))
+
+        # Sentiment analysis if text column exists
+        text_cols = [col for col in df.columns if df[col].dtype == 'object' and df[col].str.match(r'[a-zA-Z\s]+').any()]
+        if text_cols:
+            text_col = text_cols[0]
+            sentiments = df[text_col].dropna().apply(lambda x: TextBlob(str(x)).sentiment.polarity)
+            avg_sentiment = sentiments.mean()
+            insights.append(html.P(f"🔹 Sentiment Analysis ({text_col}):", className="text-light"))
+            insights.append(html.P(f"Average Sentiment: {avg_sentiment:.2f} (Negative < 0 < Positive)", className="text-light"))
 
         return insights if insights else ["No smart insights available"]
     except Exception as e:
@@ -585,7 +548,32 @@ def perform_scenario_analysis(df, scenario_column, scenario_adjustment):
         logger.error(f"Scenario analysis error: {e}")
         return f"Error performing scenario analysis: {str(e)}", []
 
-def generate_executive_summary(df, kpi_cards, smart_insights):
+@cache
+def generate_ai_recommendations(df):
+    try:
+        numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
+        if len(numerical_cols) < 2:
+            return ["Not enough numerical columns for AI recommendations"]
+        features = df[numerical_cols].dropna()
+        if len(features) < 3:
+            return [f"Not enough samples ({len(features)}) for recommendations (need at least 3)"]
+        recommendations = []
+        revenue_col = next((col for col in df.columns if any(k in col.lower() for k in ['revenue', 'amount'])), None)
+        stock_col = next((col for col in df.columns if 'stock' in col.lower()), None)
+        product_col = next((col for col in df.columns if 'product' in col.lower()), None)
+        store_col = next((col for col in df.columns if 'store' in col.lower()), None)
+        if revenue_col and stock_col and product_col and store_col:
+            top_products = df.groupby([product_col, store_col])[revenue_col].sum().reset_index()
+            top_products = top_products.sort_values(by=revenue_col, ascending=False).head(3)
+            for _, row in top_products.iterrows():
+                recommendation = f"Increase stock for {row[product_col]} in {row[store_col]} to potentially boost {revenue_col.lower()} by 10%"
+                recommendations.append(recommendation)
+        return recommendations if recommendations else ["No AI recommendations available"]
+    except Exception as e:
+        logger.error(f"AI recommendations error: {e}")
+        return [f"Error generating AI recommendations: {str(e)}"]
+
+def generate_executive_summary(df, kpi_cards, smart_insights, ai_recommendations):
     try:
         if pdfkit is None:
             return None
@@ -626,6 +614,15 @@ def generate_executive_summary(df, kpi_cards, smart_insights):
             elif isinstance(insight, html.Ul):
                 for li in insight.children:
                     html_content += f"<li>{li.children}</li>"
+        html_content += """
+                </ul>
+            </div>
+            <div class="section">
+                <h2>AI Recommendations</h2>
+                <ul>
+        """
+        for rec in ai_recommendations:
+            html_content += f"<li>{rec}</li>"
         html_content += """
                 </ul>
             </div>
@@ -678,6 +675,10 @@ sidebar = dbc.Col([
             html.Div(id='scenario-results'),
             html.H5("Smart Insights", className="card-title text-light mt-3"),
             html.Div(id='smart-insights', style={'maxHeight': '200px', 'overflowY': 'auto'}),
+            html.H5("AI Recommendations", className="card-title text-light mt-3"),
+            html.Div(id='ai-recommendations', style={'maxHeight': '200px', 'overflowY': 'auto'}),
+            html.Button("Export Recommendations 📜", id="export-recommendations", className="btn btn-outline-cyan btn-block mb-3"),
+            dcc.Download(id="download-recommendations"),
             html.H5("Collaboration", className="card-title text-light mt-3"),
             dcc.Textarea(id='comment-input', placeholder="Add a comment...", style={'width': '100%', 'height': 50}, className="mb-2"),
             html.Button("Submit Comment", id="submit-comment", className="btn btn-outline-cyan btn-block mb-3"),
@@ -874,7 +875,7 @@ def update_x_axis_filter_values(x_axis, data):
      Input('what-if-column', 'value'),
      Input('what-if-adjust', 'value'),
      Input('x-axis-filter-values', 'value'),
-     Input('analysis-y-axis', 'value')],
+     Input('analysis-y-axis', 'value')],  # Added analysis-y-axis as input
     prevent_initial_call=True
 )
 def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis, what_if_column, what_if_adjust, x_axis_filter_values, y_axes):
@@ -886,7 +887,9 @@ def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis,
         logger.info(f"Initial DataFrame shape: {df.shape}")
         logger.info(f"Initial unique values in {analysis_x_axis}: {df[analysis_x_axis].unique() if analysis_x_axis in df.columns else 'N/A'}")
         
+        # Apply column filter (if any)
         if filter_column and filter_values:
+            # Clean filter values and DataFrame column to ensure consistency (e.g., lowercase, strip whitespace)
             filter_values = [str(val).lower().strip() for val in filter_values]
             df[filter_column] = df[filter_column].astype(str).str.lower().str.strip()
             df = df[df[filter_column].isin(filter_values)]
@@ -894,18 +897,21 @@ def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis,
             if df.empty:
                 return [], ["No data available after filtering"], None, []
         
+        # Apply X-axis filter (if any)
         if analysis_x_axis and x_axis_filter_values and analysis_x_axis in df.columns:
             df = df[df[analysis_x_axis].isin(x_axis_filter_values)]
             logger.info(f"After X-axis filter ({analysis_x_axis} in {x_axis_filter_values}): DataFrame shape: {df.shape}")
             if df.empty:
                 return [], ["No data available after X-axis filtering"], None, []
         
+        # Apply what-if analysis (if any)
         if what_if_column and what_if_adjust and what_if_column in df.columns:
             if pd.api.types.is_numeric_dtype(df[what_if_column]):
                 df[what_if_column] = df[what_if_column] * (1 + what_if_adjust / 100)
         
         data_store.filtered_df = df
         kpi_cards = generate_kpi_cards(df)
+        # Pass the first selected Y-axis (if any) to generate_smart_insights
         y_axis = y_axes[0] if y_axes else None
         smart_insights = generate_smart_insights(df, y_axis)
         table_data = df.to_dict('records')
@@ -1112,6 +1118,43 @@ def update_scenario_analysis(scenario_column, scenario_adjust, data):
     return [table]
 
 @app.callback(
+    Output('ai-recommendations', 'children'),
+    [Input('filtered-data', 'data')]
+)
+def update_recommendations(data):
+    if not data:
+        return ["Please upload data"]
+    
+    df = pd.DataFrame(data)
+    ai_recommendations = generate_ai_recommendations(df)
+    return ai_recommendations
+
+@app.callback(
+    Output('download-recommendations', 'data'),
+    [Input('export-recommendations', "n_clicks")],
+    [State('ai-recommendations', 'children')],
+    prevent_initial_call=True
+)
+def export_recommendations(n_clicks, recommendations):
+    if not recommendations:
+        return None
+    content = "\n".join([rec if isinstance(rec, str) else rec.children for rec in recommendations])
+    return dict(content=content, filename="recommendations.txt")
+
+@app.callback(
+    [Output('comments-section', 'children'),
+     Output('comment-input', 'value')],
+    [Input('submit-comment', 'n_clicks')],
+    [State('comment-input', 'value')]
+)
+def update_comments(n_clicks, comment):
+    if not n_clicks or not comment:
+        return data_store.comments, ""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    data_store.comments.append(f"{timestamp}: {comment}")
+    return data_store.comments, ""
+
+@app.callback(
     Output('summary-stats', 'children'),
     [Input('filtered-data', 'data')]
 )
@@ -1132,31 +1175,19 @@ def update_summary_stats(data):
     )
 
 @app.callback(
-    [Output('comments-section', 'children'),
-     Output('comment-input', 'value')],
-    [Input('submit-comment', 'n_clicks')],
-    [State('comment-input', 'value')]
-)
-def update_comments(n_clicks, comment):
-    if not n_clicks or not comment:
-        return data_store.comments, ""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data_store.comments.append(f"{timestamp}: {comment}")
-    return data_store.comments, ""
-
-@app.callback(
     Output('download-report', 'data'),
     [Input('export-report', 'n_clicks')],
     [State('filtered-data', 'data'),
      State('kpi-cards', 'children'),
-     State('smart-insights', 'children')],
+     State('smart-insights', 'children'),
+     State('ai-recommendations', 'children')],
     prevent_initial_call=True
 )
-def export_executive_summary(n_clicks, data, kpi_cards, smart_insights):
+def export_executive_summary(n_clicks, data, kpi_cards, smart_insights, ai_recommendations):
     if not data:
         return None
     df = pd.DataFrame(data)
-    return generate_executive_summary(df, kpi_cards, smart_insights)
+    return generate_executive_summary(df, kpi_cards, smart_insights, ai_recommendations)
 
 if __name__ == '__main__':
     app.run_server(debug=True)
