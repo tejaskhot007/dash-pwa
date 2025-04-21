@@ -548,32 +548,7 @@ def perform_scenario_analysis(df, scenario_column, scenario_adjustment):
         logger.error(f"Scenario analysis error: {e}")
         return f"Error performing scenario analysis: {str(e)}", []
 
-@cache
-def generate_ai_recommendations(df):
-    try:
-        numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
-        if len(numerical_cols) < 2:
-            return ["Not enough numerical columns for AI recommendations"]
-        features = df[numerical_cols].dropna()
-        if len(features) < 3:
-            return [f"Not enough samples ({len(features)}) for recommendations (need at least 3)"]
-        recommendations = []
-        revenue_col = next((col for col in df.columns if any(k in col.lower() for k in ['revenue', 'amount'])), None)
-        stock_col = next((col for col in df.columns if 'stock' in col.lower()), None)
-        product_col = next((col for col in df.columns if 'product' in col.lower()), None)
-        store_col = next((col for col in df.columns if 'store' in col.lower()), None)
-        if revenue_col and stock_col and product_col and store_col:
-            top_products = df.groupby([product_col, store_col])[revenue_col].sum().reset_index()
-            top_products = top_products.sort_values(by=revenue_col, ascending=False).head(3)
-            for _, row in top_products.iterrows():
-                recommendation = f"Increase stock for {row[product_col]} in {row[store_col]} to potentially boost {revenue_col.lower()} by 10%"
-                recommendations.append(recommendation)
-        return recommendations if recommendations else ["No AI recommendations available"]
-    except Exception as e:
-        logger.error(f"AI recommendations error: {e}")
-        return [f"Error generating AI recommendations: {str(e)}"]
-
-def generate_executive_summary(df, kpi_cards, smart_insights, ai_recommendations):
+def generate_executive_summary(df, kpi_cards, smart_insights):
     try:
         if pdfkit is None:
             return None
@@ -614,15 +589,6 @@ def generate_executive_summary(df, kpi_cards, smart_insights, ai_recommendations
             elif isinstance(insight, html.Ul):
                 for li in insight.children:
                     html_content += f"<li>{li.children}</li>"
-        html_content += """
-                </ul>
-            </div>
-            <div class="section">
-                <h2>AI Recommendations</h2>
-                <ul>
-        """
-        for rec in ai_recommendations:
-            html_content += f"<li>{rec}</li>"
         html_content += """
                 </ul>
             </div>
@@ -675,10 +641,6 @@ sidebar = dbc.Col([
             html.Div(id='scenario-results'),
             html.H5("Smart Insights", className="card-title text-light mt-3"),
             html.Div(id='smart-insights', style={'maxHeight': '200px', 'overflowY': 'auto'}),
-            html.H5("AI Recommendations", className="card-title text-light mt-3"),
-            html.Div(id='ai-recommendations', style={'maxHeight': '200px', 'overflowY': 'auto'}),
-            html.Button("Export Recommendations 📜", id="export-recommendations", className="btn btn-outline-cyan btn-block mb-3"),
-            dcc.Download(id="download-recommendations"),
             html.H5("Collaboration", className="card-title text-light mt-3"),
             dcc.Textarea(id='comment-input', placeholder="Add a comment...", style={'width': '100%', 'height': 50}, className="mb-2"),
             html.Button("Submit Comment", id="submit-comment", className="btn btn-outline-cyan btn-block mb-3"),
@@ -875,7 +837,7 @@ def update_x_axis_filter_values(x_axis, data):
      Input('what-if-column', 'value'),
      Input('what-if-adjust', 'value'),
      Input('x-axis-filter-values', 'value'),
-     Input('analysis-y-axis', 'value')],  # Added analysis-y-axis as input
+     Input('analysis-y-axis', 'value')],
     prevent_initial_call=True
 )
 def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis, what_if_column, what_if_adjust, x_axis_filter_values, y_axes):
@@ -1118,30 +1080,6 @@ def update_scenario_analysis(scenario_column, scenario_adjust, data):
     return [table]
 
 @app.callback(
-    Output('ai-recommendations', 'children'),
-    [Input('filtered-data', 'data')]
-)
-def update_recommendations(data):
-    if not data:
-        return ["Please upload data"]
-    
-    df = pd.DataFrame(data)
-    ai_recommendations = generate_ai_recommendations(df)
-    return ai_recommendations
-
-@app.callback(
-    Output('download-recommendations', 'data'),
-    [Input('export-recommendations', "n_clicks")],
-    [State('ai-recommendations', 'children')],
-    prevent_initial_call=True
-)
-def export_recommendations(n_clicks, recommendations):
-    if not recommendations:
-        return None
-    content = "\n".join([rec if isinstance(rec, str) else rec.children for rec in recommendations])
-    return dict(content=content, filename="recommendations.txt")
-
-@app.callback(
     [Output('comments-section', 'children'),
      Output('comment-input', 'value')],
     [Input('submit-comment', 'n_clicks')],
@@ -1179,15 +1117,14 @@ def update_summary_stats(data):
     [Input('export-report', 'n_clicks')],
     [State('filtered-data', 'data'),
      State('kpi-cards', 'children'),
-     State('smart-insights', 'children'),
-     State('ai-recommendations', 'children')],
+     State('smart-insights', 'children')],
     prevent_initial_call=True
 )
-def export_executive_summary(n_clicks, data, kpi_cards, smart_insights, ai_recommendations):
+def export_executive_summary(n_clicks, data, kpi_cards, smart_insights):
     if not data:
         return None
     df = pd.DataFrame(data)
-    return generate_executive_summary(df, kpi_cards, smart_insights, ai_recommendations)
+    return generate_executive_summary(df, kpi_cards, smart_insights)
 
 if __name__ == '__main__':
     app.run_server(debug=True)
