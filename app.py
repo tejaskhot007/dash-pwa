@@ -12,40 +12,25 @@ import plotly.figure_factory as ff
 from datetime import datetime
 import chardet
 import numpy as np
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
-from prophet import Prophet
 import zipfile
-from sklearn.metrics import mean_absolute_error, mean_squared_error
 import functools
 import warnings
+import re
 try:
     import pdfkit
 except ImportError:
     pdfkit = None
 import plotly.io as pio
-import requests
-from textblob import TextBlob
-import holidays
-import nltk
 
-# Download required NLTK data
-try:
-    nltk.data.find('corpora/wordnet')
-except LookupError:
-    nltk.download('wordnet')
-try:
-    nltk.data.find('corpora/punkt')
-except LookupError:
-    nltk.download('punkt')
-
-warnings.filterwarnings("ignore")
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Initialize Dash app
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.DARKLY], suppress_callback_exceptions=True, title="📊 Extraordinary Data Analysis Dashboard")
 server = app.server
 
+# Custom HTML template for the app
 app.index_string = '''
 <!DOCTYPE html>
 <html>
@@ -104,6 +89,7 @@ app.index_string = '''
 </html>
 '''
 
+# Data storage class
 class DataStore:
     def __init__(self):
         self.df = None
@@ -111,10 +97,10 @@ class DataStore:
         self.filtered_df = None
         self.raw_df = None
         self.original_row_count = None
-        self.comments = []
 
 data_store = DataStore()
 
+# Cache decorator for performance optimization
 def cache(func):
     cache_dict = {}
     @functools.wraps(func)
@@ -127,34 +113,90 @@ def cache(func):
         return result
     return wrapper
 
+# Data cleaning and validation function
 def clean_and_validate_data(df):
     try:
         if data_store.raw_df is None:
             data_store.raw_df = df.copy()
             data_store.original_row_count = len(df)
         simplified_messages = []
-        date_columns = [col for col in df.columns if 'date' in col.lower()]
-        for col in date_columns:
-            df[col] = pd.to_datetime(df[col], errors='coerce')
+        
+        # Identify potential date columns based on recognizable date patterns
+        potential_date_cols = []
+        for col in df.columns:
+            sample = df[col].dropna().head(5).astype(str)
+            if any('-' in s or '/' in s for s in sample) and not any(s.isdigit() and len(s) > 10 for s in sample):
+                potential_date_cols.append(col)
+        
+        # Try multiple date formats explicitly
+        date_formats = ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%Y/%m/%d']
+        for col in potential_date_cols:
+            parsed = False
+            for fmt in date_formats:
+                try:
+                    df[col] = pd.to_datetime(df[col], format=fmt, errors='coerce')
+                    if df[col].notna().any():
+                        logger.info(f"Successfully parsed {col} as datetime with format {fmt}")
+                        parsed = True
+                        break
+                except Exception as e:
+                    continue
+            if not parsed:
+                try:
+                    df[col] = pd.to_datetime(df[col], errors='coerce')  # Fallback to dateutil
+                    if df[col].notna().any():
+                        logger.info(f"Parsed {col} as datetime using dateutil fallback")
+                    else:
+                        logger.warning(f"Could not parse {col} as datetime")
+                except Exception as e:
+                    logger.warning(f"Could not parse {col} as datetime: {e}")
+
+        # Extract numeric values from object columns
+        for col in df.columns:
+            if col not in potential_date_cols and df[col].dtype == 'object':
+                try:
+                    # Extract numbers (integers or decimals, including negative)
+                    df[col] = df[col].astype(str).apply(
+                        lambda x: re.findall(r'-?\d*\.?\d+', x)[0] if re.findall(r'-?\d*\.?\d+', x) else np.nan
+                    )
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                    if df[col].notna().sum() > len(df[col]) * 0.1:  # Require at least 10% non-NA
+                        logger.info(f"Converted {col} to numeric by extracting numbers")
+                    else:
+                        df[col] = data_store.raw_df[col]  # Revert if mostly NA
+                except Exception as e:
+                    logger.warning(f"Could not extract numeric values from {col}: {e}")
+                    df[col] = data_store.raw_df[col]
+
+        # Clean object columns and preserve numeric columns
+        numerical_cols = [col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])]
         for col in df.select_dtypes(include=['object']).columns:
-            df[col] = df[col].str.lower().str.strip()
-        numerical_cols = [col for col in df.columns if any(k in col.lower() for k in ['price', 'sales', 'revenue', 'stock', 'quantity', 'amount'])]
+            if col not in potential_date_cols and col not in numerical_cols:
+                df[col] = df[col].str.lower().str.strip()
         for col in numerical_cols:
             df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Drop columns that are entirely NA
         df = df.dropna(how='all', axis=1)
+        
+        # Handle missing values
         for col in df.columns:
             if df[col].isna().sum() > 0:
-                if df[col].dtype in ['int64', 'float64']:
+                if pd.api.types.is_numeric_dtype(df[col]):
                     df[col] = df[col].fillna(df[col].median())
                 else:
                     df[col] = df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else 'Unknown')
+        
+        # Remove duplicates
         df = df.drop_duplicates(keep='first')
+        
         return df, simplified_messages
     except Exception as e:
         logger.error(f"Data cleaning error: {e}")
         return None, [f"Error during cleaning: {str(e)}"]
 
-def parse_contents(contents, filename, max_rows=5000):
+# File parsing function
+def parse_contents(contents, filename, max_rows=None):
     try:
         content_type, content_string = contents.split(',')
         decoded = base64.b64decode(content_string)
@@ -167,20 +209,16 @@ def parse_contents(contents, filename, max_rows=5000):
             raise ValueError("Unsupported file format")
         if df.empty:
             return None, ["Uploaded file is empty"]
-        if len(df) > max_rows:
-            df = df.sample(n=max_rows, random_state=42)
-            simplified_messages = [f"Dataset downsampled to {max_rows} rows"]
-        else:
-            simplified_messages = []
         df, cleaning_messages = clean_and_validate_data(df)
         if df is None:
             return None, cleaning_messages
-        simplified_messages.extend(cleaning_messages)
+        simplified_messages = cleaning_messages
         return df, simplified_messages
     except Exception as e:
         logger.error(f"File parsing error: {e}")
         return None, [f"Error parsing file: {str(e)}"]
 
+# Main chart generation function
 @cache
 def generate_main_chart(df, x_axis, y_axes, chart_type, dark_mode, selected_category):
     try:
@@ -196,19 +234,15 @@ def generate_main_chart(df, x_axis, y_axes, chart_type, dark_mode, selected_cate
             logger.error(f"One or more Y-axes {y_axes} are not numerical for bar chart")
             return px.scatter(title=f"Y-axes must be numerical for bar chart")
 
-        if len(df) > 500:
-            df = df.sample(500, random_state=42)
-            logger.info("Data sampled to 500 rows")
-
         if df.empty:
-            logger.error("Sampled data is empty")
-            return px.scatter(title="Sampled data is empty")
+            logger.error("Data is empty")
+            return px.scatter(title="Data is empty")
 
         template = 'plotly_dark' if dark_mode else 'plotly'
 
         if chart_type == 'bar':
             grouped_df = df.groupby(x_axis)[y_axes].sum().reset_index()
-            logger.info(f"Grouped DataFrame for toolbar chart:\n{grouped_df}")
+            logger.info(f"Grouped DataFrame for bar chart:\n{grouped_df}")
             fig = go.Figure()
             for y_axis in y_axes:
                 fig.add_trace(go.Bar(x=grouped_df[x_axis], y=grouped_df[y_axis], name=y_axis))
@@ -261,7 +295,8 @@ def generate_main_chart(df, x_axis, y_axes, chart_type, dark_mode, selected_cate
             if len(y_axes) > 1:
                 return px.scatter(title="Regression supports only one Y-axis")
             y_axis = y_axes[0]
-            if (df[x_axis].dtype in ['int64', 'float64'] and df[y_axis].dtype in ['int64', 'float64']):
+            if (pd.api.types.is_numeric_dtype(df[x_axis]) and pd.api.types.is_numeric_dtype(df[y_axis])):
+                from sklearn.linear_model import LinearRegression
                 X = df[[x_axis]].dropna()
                 y = df.loc[X.index, y_axis]
                 model = LinearRegression()
@@ -282,6 +317,7 @@ def generate_main_chart(df, x_axis, y_axes, chart_type, dark_mode, selected_cate
         logger.error(f"Main chart error: {e}")
         return px.scatter(title=f"Error generating main chart: {str(e)}")
 
+# Pie chart generation function
 @cache
 def generate_pie_chart(df, names_col, dark_mode, selected_category):
     try:
@@ -293,9 +329,10 @@ def generate_pie_chart(df, names_col, dark_mode, selected_category):
             return px.scatter(title="No numerical columns available for Pie Chart values")
         values_col = numerical_cols[0]
 
-        if len(df) > 500:
-            df = df.sample(500, random_state=42)
-        
+        if df.empty:
+            logger.error("Data is empty")
+            return px.scatter(title="Data is empty")
+
         fig = px.pie(df, names=names_col, values=values_col, template='plotly_dark' if dark_mode else 'plotly', title=f"Pie: {names_col} Distribution")
         if selected_category:
             explode = [0.1 if x == selected_category else 0 for x in df[names_col].unique()]
@@ -305,13 +342,15 @@ def generate_pie_chart(df, names_col, dark_mode, selected_category):
         logger.error(f"Pie chart error: {e}")
         return px.scatter(title=f"Error generating pie chart: {str(e)}")
 
+# Line chart generation function
 @cache
 def generate_line_chart(df, x_axis, y_axis, dark_mode, selected_category):
     try:
         if not x_axis or not y_axis or x_axis not in df.columns or y_axis not in df.columns:
             return px.scatter(title="Please select X and Y axes for the Line Chart")
-        if len(df) > 500:
-            df = df.sample(500, random_state=42)
+        if df.empty:
+            logger.error("Data is empty")
+            return px.scatter(title="Data is empty")
         fig = px.line(df, x=x_axis, y=y_axis, template='plotly_dark' if dark_mode else 'plotly', title=f"Line: {x_axis} vs {y_axis}")
         if selected_category:
             fig.add_scatter(x=[selected_category], y=[df[df[x_axis] == selected_category][y_axis].iloc[0]], mode='markers', marker=dict(size=15, color='#00d4ff'), showlegend=False)
@@ -320,14 +359,16 @@ def generate_line_chart(df, x_axis, y_axis, dark_mode, selected_category):
         logger.error(f"Line chart error: {e}")
         return px.scatter(title=f"Error generating line chart: {str(e)}")
 
+# Correlation heatmap generation function
 @cache
 def generate_correlation_heatmap(df, dark_mode):
     try:
         numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
         if len(numerical_cols) < 2:
             return px.scatter(title="Not enough numerical columns for correlation")
-        if len(df) > 500:
-            df = df.sample(500, random_state=42)
+        if df.empty:
+            logger.error("Data is empty")
+            return px.scatter(title="Data is empty")
         corr_matrix = df[numerical_cols].corr()
         fig = ff.create_annotated_heatmap(z=corr_matrix.values, x=numerical_cols, y=numerical_cols, colorscale='Plasma' if dark_mode else 'Viridis', showscale=True)
         fig.update_layout(title="Correlation Heatmap", template='plotly_dark' if dark_mode else 'plotly')
@@ -336,103 +377,12 @@ def generate_correlation_heatmap(df, dark_mode):
         logger.error(f"Correlation heatmap error: {e}")
         return px.scatter(title=f"Error generating correlation heatmap: {str(e)}")
 
-@cache
-def generate_trend_chart(df, x_axis, y_axis, dark_mode):
-    try:
-        if not x_axis or not y_axis or x_axis not in df.columns or y_axis not in df.columns:
-            return px.scatter(title="Select a date column (X-axis) and Y-axis for trend analysis")
-        df[x_axis] = pd.to_datetime(df[x_axis], errors='coerce')
-        if df[x_axis].isna().all():
-            return px.scatter(title="Invalid date column format")
-        if len(df) > 500:
-            df = df.sample(500, random_state=42)
-        trend_data = df.groupby(x_axis)[y_axis].sum().reset_index()
-        fig = px.line(trend_data, x=x_axis, y=y_axis, template='plotly_dark' if dark_mode else 'plotly')
-        fig.update_layout(title=f"Trend of {y_axis} Over Time")
-        return fig
-    except Exception as e:
-        logger.error(f"Trend chart error: {e}")
-        return px.scatter(title=f"Error generating trend chart: {str(e)}")
-
-@cache
-def generate_forecast(df, x_axis, y_axis, periods=30, dark_mode=True, country='US'):
-    try:
-        if not x_axis or x_axis not in df.columns:
-            return px.scatter(title="Please select a valid date column for X-axis")
-        if not y_axis or y_axis not in df.columns:
-            return px.scatter(title="Please select a valid numerical column for Y-axis")
-        if not pd.api.types.is_numeric_dtype(df[y_axis]):
-            return px.scatter(title=f"Y-axis '{y_axis}' is not numerical")
-        df[x_axis] = pd.to_datetime(df[x_axis], errors='coerce')
-        if df[x_axis].isna().all():
-            return px.scatter(title="Invalid date column format")
-        forecast_data = df[[x_axis, y_axis]].rename(columns={x_axis: 'ds', y_axis: 'y'}).dropna()
-        if len(forecast_data) < 2:
-            return px.scatter(title="Not enough data for forecasting")
-        forecast_data = forecast_data.groupby('ds')['y'].sum().reset_index()
-
-        # Add holidays as regressors
-        us_holidays = holidays.country_holidays(country)
-        forecast_data['holiday'] = forecast_data['ds'].apply(lambda x: us_holidays.get(x))
-        forecast_data['holiday'] = forecast_data['holiday'].fillna(0).astype(int)
-
-        train_size = int(len(forecast_data) * 0.8)
-        train_data = forecast_data[:train_size]
-        test_data = forecast_data[train_size:]
-        model = Prophet(yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=True, changepoint_prior_scale=0.05, seasonality_prior_scale=10.0)
-        model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
-        model.add_regressor('holiday')
-        model.fit(train_data)
-        future = model.make_future_dataframe(periods=periods + len(test_data), freq='D')
-        future['holiday'] = future['ds'].apply(lambda x: us_holidays.get(x)).fillna(0).astype(int)
-        forecast = model.predict(future)
-        test_forecast = forecast[forecast['ds'].isin(test_data['ds'])]
-        test_actual = test_data['y'].values
-        test_predicted = test_forecast['yhat'].values
-        mae = mean_absolute_error(test_actual, test_predicted)
-        rmse = np.sqrt(mean_squared_error(test_actual, test_predicted))
-        mape = np.mean(np.abs((test_actual - test_predicted) / test_actual)) * 100
-        accuracy_message = f"MAE: {mae:.2f}, RMSE: {rmse:.2f}, MAPE: {mape:.2f}%"
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=forecast_data['ds'], y=forecast_data['y'], mode='lines', name='Actual', line=dict(color='#1f77b4')))
-        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], mode='lines', name='Forecast', line=dict(color='#ff7f0e')))
-        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_lower'], fill=None, mode='lines', line=dict(color='rgba(0,0,0,0)'), showlegend=False))
-        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat_upper'], fill='tonexty', mode='lines', line=dict(color='rgba(0,0,0,0)'), name='Confidence Interval'))
-        fig.update_layout(title=f"Forecast of {y_axis} for Next {periods} Days ({accuracy_message})", template='plotly_dark' if dark_mode else 'plotly', xaxis_title="Date", yaxis_title=y_axis, hovermode='x unified')
-        return fig
-    except Exception as e:
-        logger.error(f"Forecast error: {e}")
-        return px.scatter(title=f"Error in forecasting: {str(e)}")
-
-@cache
-def generate_feature_importance(df, x_axis, y_axis, dark_mode):
-    try:
-        if not y_axis or y_axis not in df.columns or df[y_axis].dtype not in ['int64', 'float64']:
-            return px.scatter(title="Select a numerical Y-axis for feature importance")
-        features = df.select_dtypes(include=['number']).columns.tolist()
-        features = [col for col in features if col != y_axis]
-        if not features:
-            return px.scatter(title="Not enough numerical features for analysis")
-        if len(df) > 500:
-            df = df.sample(500, random_state=42)
-        X = df[features].fillna(0)
-        y = df[y_axis].fillna(0)
-        model = RandomForestRegressor(n_estimators=10, random_state=42)
-        model.fit(X, y)
-        importances = model.feature_importances_
-        fig = px.bar(x=importances, y=features, orientation='h', template='plotly_dark' if dark_mode else 'plotly')
-        fig.update_layout(title=f"Feature Importance for {y_axis}", xaxis_title="Importance", yaxis_title="Feature")
-        return fig
-    except Exception as e:
-        logger.error(f"Feature importance error: {e}")
-        return px.scatter(title=f"Error generating feature importance: {str(e)}")
-
+# Smart insights generation function
 @cache
 def generate_smart_insights(df, y_axis=None):
     try:
         insights = []
         categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
-        datetime_cols = df.select_dtypes(include=['datetime']).columns.tolist()
         
         if y_axis and y_axis in df.columns and pd.api.types.is_numeric_dtype(df[y_axis]):
             num_col = y_axis
@@ -445,49 +395,23 @@ def generate_smart_insights(df, y_axis=None):
         if not num_col:
             return ["No suitable numerical column found for insights"]
 
-        # Existing categorical insights
         for cat_col in categorical_cols:
             if cat_col in df.columns and num_col in df.columns:
                 top_performers = df.groupby(cat_col)[num_col].sum().sort_values(ascending=False).head(3)
                 insights.append(html.P(f"🔹 Top 3 {cat_col} by {num_col}:", className="text-light"))
                 insights.append(html.Ul([html.Li(f"{idx}: {val:.2f}") for idx, val in top_performers.items()], className="text-light"))
 
-        # Time-based insights with holiday impact
-        if datetime_cols:
-            date_col = datetime_cols[0]
-            if date_col in df.columns and num_col in df.columns:
-                df['month'] = df[date_col].dt.month
-                monthly_trend = df.groupby('month')[num_col].sum()
-                max_month = monthly_trend.idxmax()
-                min_month = monthly_trend.idxmin()
-                us_holidays = holidays.country_holidays('US')
-                holiday_dates = df[df[date_col].isin(us_holidays)].copy()
-                if not holiday_dates.empty:
-                    holiday_impact = holiday_dates[num_col].sum() / df[num_col].sum() * 100
-                    insights.append(html.P(f"🔹 {num_col} Trend:", className="text-light"))
-                    insights.append(html.P(f"Highest in month {max_month}: {monthly_trend[max_month]:.2f}", className="text-light"))
-                    insights.append(html.P(f"Lowest in month {min_month}: {monthly_trend[min_month]:.2f}", className="text-light"))
-                    insights.append(html.P(f"Holiday Impact: {holiday_impact:.2f}% of total {num_col}", className="text-light"))
-
-        # Sentiment analysis if text column exists
-        text_cols = [col for col in df.columns if df[col].dtype == 'object' and df[col].str.match(r'[a-zA-Z\s]+').any()]
-        if text_cols:
-            text_col = text_cols[0]
-            sentiments = df[text_col].dropna().apply(lambda x: TextBlob(str(x)).sentiment.polarity)
-            avg_sentiment = sentiments.mean()
-            insights.append(html.P(f"🔹 Sentiment Analysis ({text_col}):", className="text-light"))
-            insights.append(html.P(f"Average Sentiment: {avg_sentiment:.2f} (Negative < 0 < Positive)", className="text-light"))
-
         return insights if insights else ["No smart insights available"]
     except Exception as e:
         logger.error(f"Smart insights error: {e}")
         return [f"Error generating smart insights: {str(e)}"]
 
+# KPI cards generation function
 def generate_kpi_cards(df):
     try:
         kpi_cards = []
         numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
-        revenue_col = next((col for col in numerical_cols if any(k in col.lower() for k in ['revenue', 'amount'])), None)
+        revenue_col = next((col for col in numerical_cols if any(k in col.lower() for k in ['revenue', 'amount', 'sales'])), None)
         if revenue_col:
             total_revenue = df[revenue_col].sum()
             kpi_cards.append(dbc.Col(
@@ -517,37 +441,7 @@ def generate_kpi_cards(df):
         logger.error(f"KPI cards error: {e}")
         return [dbc.Col(html.P(f"Error generating KPI cards: {str(e)}", className="text-danger"), width=12)]
 
-def perform_scenario_analysis(df, scenario_column, scenario_adjustment):
-    try:
-        if not scenario_column or scenario_column not in df.columns or not pd.api.types.is_numeric_dtype(df[scenario_column]):
-            return "Select a numerical column for scenario analysis", []
-        df_scenario = df.copy()
-        df_scenario[scenario_column] = df_scenario[scenario_column] * (1 + scenario_adjustment / 100)
-        revenue_col = next((col for col in df.columns if any(k in col.lower() for k in ['revenue', 'amount'])), None)
-        price_col = next((col for col in df.columns if 'price' in col.lower()), None)
-        sales_col = next((col for col in df.columns if 'sales' in col.lower()), None)
-        if revenue_col and price_col and sales_col:
-            df_scenario[revenue_col] = df_scenario[price_col] * df_scenario[sales_col]
-        original_metrics = {}
-        scenario_metrics = {}
-        if revenue_col:
-            original_metrics[f'Total {revenue_col.title()}'] = df[revenue_col].sum()
-            scenario_metrics[f'Total {revenue_col.title()}'] = df_scenario[revenue_col].sum()
-        if revenue_col and 'order_id' in df.columns:
-            original_metrics['Avg Order Value'] = df.groupby('order_id')[revenue_col].sum().mean()
-            scenario_metrics['Avg Order Value'] = df_scenario.groupby('order_id')[revenue_col].sum().mean()
-        comparison_table = dash_table.DataTable(
-            columns=[{"name": "Metric", "id": "metric"}, {"name": "Original", "id": "original"}, {"name": "Scenario", "id": "scenario"}, {"name": "Change (%)", "id": "change"}],
-            data=[{"metric": metric, "original": f"${original_metrics[metric]:,.2f}", "scenario": f"${scenario_metrics[metric]:,.2f}", "change": f"{((scenario_metrics[metric] - original_metrics[metric]) / original_metrics[metric] * 100):.2f}%"} for metric in original_metrics.keys()],
-            style_table={'overflowX': 'auto'},
-            style_cell={'textAlign': 'left', 'backgroundColor': '#1f2a44', 'color': 'white'},
-            style_header={'backgroundColor': '#1f2a44', 'color': 'white', 'fontWeight': 'bold'},
-        )
-        return None, comparison_table
-    except Exception as e:
-        logger.error(f"Scenario analysis error: {e}")
-        return f"Error performing scenario analysis: {str(e)}", []
-
+# Executive summary generation function
 def generate_executive_summary(df, kpi_cards, smart_insights):
     try:
         if pdfkit is None:
@@ -603,6 +497,7 @@ def generate_executive_summary(df, kpi_cards, smart_insights):
         logger.error(f"Executive summary error: {e}")
         return None
 
+# Sidebar layout
 sidebar = dbc.Col([
     dbc.Card([
         dbc.CardBody([
@@ -623,9 +518,6 @@ sidebar = dbc.Col([
                 {'label': 'Box Plot', 'value': 'box'},
                 {'label': 'Regression', 'value': 'regression'}
             ], value='bar', className="mb-3 dropdown-purple"),
-            html.H5("Data Prediction", className="card-title text-light mt-3"),
-            dcc.Dropdown(id='prediction-x-axis', placeholder="Select Date Column (X-axis)", className="mb-3 dropdown-purple"),
-            dcc.Dropdown(id='prediction-y-axis', placeholder="Select Numerical Column (Y-axis)", className="mb-3 dropdown-purple"),
             dcc.Dropdown(id='column-filter', placeholder="Select a column to filter", className="mb-3 dropdown-purple"),
             dcc.Dropdown(id='value-filter', placeholder="Select values to filter", value=[], multi=True, className="mb-3 dropdown-purple"),
             dbc.Switch(id='dark-mode-toggle', label='Dark Mode', value=True, className="mb-3 text-light"),
@@ -635,16 +527,8 @@ sidebar = dbc.Col([
             html.Label("Adjust Numerical Values (% Change)", className="text-light"),
             dcc.Dropdown(id='what-if-column', placeholder="Select a numerical column", className="mb-3 dropdown-purple"),
             dcc.Slider(id='what-if-adjust', min=-50, max=50, step=5, value=0, marks={i: f"{i}%" for i in range(-50, 51, 25)}),
-            html.H5("Scenario Analysis", className="card-title text-light mt-3"),
-            dcc.Dropdown(id='scenario-column', placeholder="Select a column for scenario", className="mb-3 dropdown-purple"),
-            dcc.Slider(id='scenario-adjust', min=-50, max=50, step=5, value=0, marks={i: f"{i}%" for i in range(-50, 51, 25)}),
-            html.Div(id='scenario-results'),
             html.H5("Smart Insights", className="card-title text-light mt-3"),
             html.Div(id='smart-insights', style={'maxHeight': '200px', 'overflowY': 'auto'}),
-            html.H5("Collaboration", className="card-title text-light mt-3"),
-            dcc.Textarea(id='comment-input', placeholder="Add a comment...", style={'width': '100%', 'height': 50}, className="mb-2"),
-            html.Button("Submit Comment", id="submit-comment", className="btn btn-outline-cyan btn-block mb-3"),
-            html.Div(id='comments-section', style={'maxHeight': '200px', 'overflowY': 'auto'}),
             html.H5("Summary Statistics", className="card-title text-light mt-3"),
             html.Div(id='summary-stats'),
             html.H5("Export Report", className="card-title text-light mt-3"),
@@ -654,6 +538,7 @@ sidebar = dbc.Col([
     ], className="bg-card-dark border-0 shadow-sm")
 ], width=3, className="sidebar collapse show", id="sidebar")
 
+# Main content layout
 main_content = dbc.Col([
     dbc.NavbarSimple(
         brand="📊 Extraordinary Data Analysis Dashboard",
@@ -697,15 +582,6 @@ main_content = dbc.Col([
                 dbc.Tab(label="Correlation", tab_id="correlation-tab", children=[
                     dcc.Loading(id="loading-correlation-heatmap", type="default", children=dcc.Graph(id='correlation-heatmap', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']}))
                 ]),
-                dbc.Tab(label="Trends", tab_id="trends-tab", children=[
-                    dcc.Loading(id="loading-trend-chart", type="default", children=dcc.Graph(id='trend-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']}))
-                ]),
-                dbc.Tab(label="Forecast", tab_id="forecast-tab", children=[
-                    dcc.Loading(id="loading-forecast-chart", type="default", children=dcc.Graph(id='forecast-chart', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']}))
-                ]),
-                dbc.Tab(label="Feature Importance", tab_id="feature-importance-tab", children=[
-                    dcc.Loading(id="loading-feature-importance", type="default", children=dcc.Graph(id='feature-importance', style={'height': '400px'}, config={'displaylogo': False, 'modeBarButtonsToAdd': ['downloadImage']}))
-                ]),
             ], id="tabs", active_tab="main-tab")
         ])
     ], className="bg-card-dark border-0 shadow-sm mb-4"),
@@ -732,10 +608,9 @@ main_content = dbc.Col([
     dcc.Download(id="download-data"),
     html.Button("Download Analysis Charts 📊", id="download-analysis-charts", className="btn btn-outline-cyan btn-block mb-3"),
     dcc.Download(id="download-analysis-charts-zip"),
-    html.Button("Download Prediction Charts 📈", id="download-prediction-charts", className="btn btn-outline-cyan btn-block mb-3"),
-    dcc.Download(id="download-prediction-charts-zip"),
 ], width=9)
 
+# App layout
 app.layout = dbc.Container([
     dbc.Row([
         sidebar,
@@ -743,14 +618,12 @@ app.layout = dbc.Container([
     ])
 ], fluid=True)
 
+# Callback to update dropdowns after file upload
 @app.callback(
     [Output('analysis-x-axis', 'options'),
      Output('analysis-y-axis', 'options'),
-     Output('prediction-x-axis', 'options'),
-     Output('prediction-y-axis', 'options'),
      Output('column-filter', 'options'),
      Output('what-if-column', 'options'),
-     Output('scenario-column', 'options'),
      Output('pie-names-column', 'options'),
      Output('line-x-axis', 'options'),
      Output('line-y-axis', 'options'),
@@ -767,18 +640,17 @@ app.layout = dbc.Container([
 )
 def update_dropdowns(contents, filename):
     if contents is None:
-        return [], [], [], [], [], [], [], [], [], [], "Please upload a file", "", None, [], [], None, []
+        return [], [], [], [], [], [], [], "Please upload a file", "", None, [], [], None, []
 
     df, messages = parse_contents(contents, filename)
     if df is None:
-        return [], [], [], [], [], [], [], [], [], [], messages, "", None, [], [], None, []
+        return [], [], [], [], [], [], [], messages, "", None, [], [], None, []
 
     data_store.df = df
     data_store.last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     columns = [{'label': col, 'value': col} for col in df.columns]
     numerical_cols = [{'label': col, 'value': col} for col in df.select_dtypes(include=['number']).columns]
-    datetime_cols = [{'label': col, 'value': col} for col in df.select_dtypes(include=['datetime']).columns]
 
     table_columns = [{"name": col, "id": col} for col in df.columns]
     table_data = df.to_dict('records')
@@ -786,17 +658,17 @@ def update_dropdowns(contents, filename):
     categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
     if categorical_cols:
         default_x_axis = categorical_cols[0]
-    elif datetime_cols:
-        default_x_axis = datetime_cols[0]['value']
     else:
         default_x_axis = df.columns[0]
 
     default_y_axis = numerical_cols[0]['value'] if numerical_cols else None
 
-    return (columns, columns, datetime_cols, numerical_cols, columns, numerical_cols, numerical_cols,
-            columns, columns, numerical_cols, f"File {filename} uploaded successfully", messages,
+    upload_message = f"File {filename} contains {len(df)} rows" if df is not None else "Please upload a file"
+    return (columns, numerical_cols, columns, numerical_cols,
+            columns, columns, numerical_cols, upload_message, messages,
             df.to_dict('records'), table_data, table_columns, default_x_axis, [default_y_axis] if default_y_axis else [])
 
+# Callback to update value filter options
 @app.callback(
     Output('value-filter', 'options'),
     [Input('column-filter', 'value')],
@@ -805,12 +677,17 @@ def update_dropdowns(contents, filename):
 def update_value_filter(column, data):
     if not column or not data:
         return []
-    df = pd.DataFrame(data)
-    if column not in df.columns:
+    try:
+        df = pd.DataFrame(data)
+        if column not in df.columns:
+            return []
+        unique_values = df[column].dropna().unique()
+        return [{'label': str(val), 'value': str(val)} for val in unique_values]
+    except Exception as e:
+        logger.error(f"Error updating value filter: {e}")
         return []
-    unique_values = df[column].dropna().unique()
-    return [{'label': str(val), 'value': str(val)} for val in unique_values]
 
+# Callback to update X-axis filter values
 @app.callback(
     Output('x-axis-filter-values', 'options'),
     [Input('analysis-x-axis', 'value')],
@@ -819,12 +696,17 @@ def update_value_filter(column, data):
 def update_x_axis_filter_values(x_axis, data):
     if not x_axis or not data:
         return []
-    df = pd.DataFrame(data)
-    if x_axis not in df.columns:
+    try:
+        df = pd.DataFrame(data)
+        if x_axis not in df.columns:
+            return []
+        unique_values = df[x_axis].dropna().unique()
+        return [{'label': str(val), 'value': str(val)} for val in unique_values]
+    except Exception as e:
+        logger.error(f"Error updating X-axis filter values: {e}")
         return []
-    unique_values = df[x_axis].dropna().unique()
-    return [{'label': str(val), 'value': str(val)} for val in unique_values]
 
+# Callback to update KPI cards, smart insights, and filtered data
 @app.callback(
     [Output('kpi-cards', 'children'),
      Output('smart-insights', 'children'),
@@ -851,7 +733,6 @@ def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis,
         
         # Apply column filter (if any)
         if filter_column and filter_values:
-            # Clean filter values and DataFrame column to ensure consistency (e.g., lowercase, strip whitespace)
             filter_values = [str(val).lower().strip() for val in filter_values]
             df[filter_column] = df[filter_column].astype(str).str.lower().str.strip()
             df = df[df[filter_column].isin(filter_values)]
@@ -873,7 +754,6 @@ def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis,
         
         data_store.filtered_df = df
         kpi_cards = generate_kpi_cards(df)
-        # Pass the first selected Y-axis (if any) to generate_smart_insights
         y_axis = y_axes[0] if y_axes else None
         smart_insights = generate_smart_insights(df, y_axis)
         table_data = df.to_dict('records')
@@ -883,14 +763,12 @@ def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis,
         logger.error(f"Error in update_kpi_and_insights: {str(e)}")
         return [], [f"Error processing data: {str(e)}"], None, []
 
+# Callback to update charts
 @app.callback(
     [Output('main-chart', 'figure'),
      Output('pie-chart', 'figure'),
      Output('line-chart', 'figure'),
-     Output('correlation-heatmap', 'figure'),
-     Output('trend-chart', 'figure'),
-     Output('forecast-chart', 'figure'),
-     Output('feature-importance', 'figure')],
+     Output('correlation-heatmap', 'figure')],
     [Input('tabs', 'active_tab'),
      Input('filtered-data', 'data'),
      Input('analysis-x-axis', 'value'),
@@ -898,30 +776,25 @@ def update_kpi_and_insights(data, filter_values, filter_column, analysis_x_axis,
      Input('chart-type', 'value'),
      Input('dark-mode-toggle', 'value'),
      Input('selected-category', 'data'),
-     Input('prediction-x-axis', 'value'),
-     Input('prediction-y-axis', 'value'),
      Input('pie-names-column', 'value'),
      Input('line-x-axis', 'value'),
      Input('line-y-axis', 'value')]
 )
-def update_charts(active_tab, data, x_axis, y_axes, chart_type, dark_mode, selected_category, pred_x_axis, pred_y_axis, pie_names_col, line_x_axis, line_y_axis):
+def update_charts(active_tab, data, x_axis, y_axes, chart_type, dark_mode, selected_category, pie_names_col, line_x_axis, line_y_axis):
     empty_fig = px.scatter(title="Please upload data")
     if not data:
-        return empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, empty_fig
+        return empty_fig, empty_fig, empty_fig, empty_fig
     
     try:
         df = pd.DataFrame(data)
         if df.empty or df is None:
             empty_fig = px.scatter(title="No data available")
-            return empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, empty_fig
+            return empty_fig, empty_fig, empty_fig, empty_fig
         
         main_fig = px.scatter(title="Select X and Y axes")
         pie_fig = px.scatter(title="Select a column for the Pie Chart")
         line_fig = px.scatter(title="Select X and Y axes for the Line Chart")
         heatmap_fig = px.scatter(title="Select numerical columns")
-        trend_fig = px.scatter(title="Select a date column for trends")
-        forecast_fig = px.scatter(title="Select a date and numerical column for forecasting")
-        feature_fig = px.scatter(title="Select a numerical Y-axis for feature importance")
         
         if active_tab == "main-tab" and x_axis and y_axes:
             main_fig = generate_main_chart(df, x_axis, y_axes if y_axes else [], chart_type, dark_mode, selected_category)
@@ -931,21 +804,14 @@ def update_charts(active_tab, data, x_axis, y_axes, chart_type, dark_mode, selec
             line_fig = generate_line_chart(df, line_x_axis, line_y_axis, dark_mode, selected_category)
         elif active_tab == "correlation-tab":
             heatmap_fig = generate_correlation_heatmap(df, dark_mode)
-        elif active_tab == "trends-tab" and x_axis and y_axes:
-            y_axis = y_axes[0] if y_axes else None
-            trend_fig = generate_trend_chart(df, x_axis, y_axis, dark_mode)
-        elif active_tab == "forecast-tab" and pred_x_axis and pred_y_axis:
-            forecast_fig = generate_forecast(df, pred_x_axis, pred_y_axis, dark_mode=dark_mode)
-        elif active_tab == "feature-importance-tab" and y_axes:
-            y_axis = y_axes[0] if y_axes else None
-            feature_fig = generate_feature_importance(df, x_axis, y_axis, dark_mode)
         
-        return main_fig, pie_fig, line_fig, heatmap_fig, trend_fig, forecast_fig, feature_fig
+        return main_fig, pie_fig, line_fig, heatmap_fig
     except Exception as e:
         logger.error(f"Error in update_charts: {str(e)}")
         error_fig = px.scatter(title=f"Chart update error: {str(e)}")
-        return error_fig, error_fig, error_fig, error_fig, error_fig, error_fig, error_fig
+        return error_fig, error_fig, error_fig, error_fig
 
+# Callback to update selected category
 @app.callback(
     Output('selected-category', 'data'),
     [Input('main-chart', 'clickData')],
@@ -956,6 +822,7 @@ def update_selected_category(click_data, x_axis):
         return None
     return click_data['points'][0]['x']
 
+# Callback to download data
 @app.callback(
     Output('download-data', 'data'),
     [Input('download-button', 'n_clicks')],
@@ -970,6 +837,7 @@ def download_data(n_clicks, data):
     df.to_csv(csv_buffer, index=False)
     return dict(content=csv_buffer.getvalue(), filename="filtered_data.csv")
 
+# Callback to download analysis charts
 @app.callback(
     Output('download-analysis-charts-zip', 'data'),
     [Input('download-analysis-charts', 'n_clicks')],
@@ -998,7 +866,7 @@ def download_analysis_charts(n_clicks, main_fig, pie_fig, line_fig, heatmap_fig)
                     img_bytes = pio.to_image(fig, format='png')
                     zip_file.writestr(filename, img_bytes)
                 except Exception as e:
-                    logger.error(f"Error saving {filename}: {str(e)}")
+                    logger.error(f"Error saving {filename}: {e}")
                     continue
 
     zip_buffer.seek(0)
@@ -1009,43 +877,7 @@ def download_analysis_charts(n_clicks, main_fig, pie_fig, line_fig, heatmap_fig)
         base64=True
     )
 
-@app.callback(
-    Output('download-prediction-charts-zip', 'data'),
-    [Input('download-prediction-charts', 'n_clicks')],
-    [State('trend-chart', 'figure'),
-     State('forecast-chart', 'figure'),
-     State('feature-importance', 'figure')],
-    prevent_initial_call=True
-)
-def download_prediction_charts(n_clicks, trend_fig, forecast_fig, feature_fig):
-    if not n_clicks:
-        return None
-
-    charts = [
-        ('trend_chart.png', trend_fig),
-        ('forecast_chart.png', forecast_fig),
-        ('feature_importance.png', feature_fig)
-    ]
-
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        for filename, fig in charts:
-            if fig and 'data' in fig and fig['data']:
-                try:
-                    img_bytes = pio.to_image(fig, format='png')
-                    zip_file.writestr(filename, img_bytes)
-                except Exception as e:
-                    logger.error(f"Error saving {filename}: {str(e)}")
-                    continue
-
-    zip_buffer.seek(0)
-    return dict(
-        content=base64.b64encode(zip_buffer.getvalue()).decode(),
-        filename="prediction_charts.zip",
-        type="application/zip",
-        base64=True
-    )
-
+# Callback to clear selections
 @app.callback(
     [Output('analysis-x-axis', 'value'),
      Output('analysis-y-axis', 'value'),
@@ -1054,44 +886,15 @@ def download_prediction_charts(n_clicks, trend_fig, forecast_fig, feature_fig):
      Output('value-filter', 'value'),
      Output('what-if-column', 'value'),
      Output('what-if-adjust', 'value'),
-     Output('scenario-column', 'value'),
-     Output('scenario-adjust', 'value'),
      Output('x-axis-filter-values', 'value')],
     [Input('clear-selection', 'n_clicks')]
 )
 def clear_selection(n_clicks):
     if n_clicks:
-        return None, [], 'bar', None, [], None, 0, None, 0, []
+        return None, [], 'bar', None, [], None, 0, []
     return dash.no_update
 
-@app.callback(
-    [Output('scenario-results', 'children')],
-    [Input('scenario-column', 'value'),
-     Input('scenario-adjust', 'value')],
-    [State('filtered-data', "data")]
-)
-def update_scenario_analysis(scenario_column, scenario_adjust, data):
-    if not data or not scenario_column:
-        return ["Select a column for scenario analysis"]
-    df = pd.DataFrame(data)
-    error, table = perform_scenario_analysis(df, scenario_column, scenario_adjust)
-    if error:
-        return [error]
-    return [table]
-
-@app.callback(
-    [Output('comments-section', 'children'),
-     Output('comment-input', 'value')],
-    [Input('submit-comment', 'n_clicks')],
-    [State('comment-input', 'value')]
-)
-def update_comments(n_clicks, comment):
-    if not n_clicks or not comment:
-        return data_store.comments, ""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data_store.comments.append(f"{timestamp}: {comment}")
-    return data_store.comments, ""
-
+# Callback to update summary statistics
 @app.callback(
     Output('summary-stats', 'children'),
     [Input('filtered-data', 'data')]
@@ -1099,19 +902,24 @@ def update_comments(n_clicks, comment):
 def update_summary_stats(data):
     if not data:
         return "Please upload data"
-    df = pd.DataFrame(data)
-    numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
-    if not numerical_cols:
-        return "No numerical columns available for summary statistics"
-    stats = df[numerical_cols].describe().reset_index()
-    return dash_table.DataTable(
-        data=stats.to_dict('records'),
-        columns=[{"name": i, "id": i} for i in stats.columns],
-        style_table={'overflowX': 'auto'},
-        style_cell={'textAlign': 'left', 'backgroundColor': '#1f2a44', 'color': 'white'},
-        style_header={'backgroundColor': '#1f2a44', 'color': 'white', 'fontWeight': 'bold'}
-    )
+    try:
+        df = pd.DataFrame(data)
+        numerical_cols = df.select_dtypes(include=['number']).columns.tolist()
+        if not numerical_cols:
+            return "No numerical columns available for summary statistics"
+        stats = df[numerical_cols].describe().reset_index()
+        return dash_table.DataTable(
+            data=stats.to_dict('records'),
+            columns=[{"name": i, "id": i} for i in stats.columns],
+            style_table={'overflowX': 'auto'},
+            style_cell={'textAlign': 'left', 'backgroundColor': '#1f2a44', 'color': 'white'},
+            style_header={'backgroundColor': '#1f2a44', 'color': 'white', 'fontWeight': 'bold'}
+        )
+    except Exception as e:
+        logger.error(f"Error updating summary stats: {e}")
+        return f"Error generating summary statistics: {str(e)}"
 
+# Callback to export executive summary
 @app.callback(
     Output('download-report', 'data'),
     [Input('export-report', 'n_clicks')],
@@ -1126,5 +934,6 @@ def export_executive_summary(n_clicks, data, kpi_cards, smart_insights):
     df = pd.DataFrame(data)
     return generate_executive_summary(df, kpi_cards, smart_insights)
 
+# Run the app
 if __name__ == '__main__':
     app.run_server(debug=True)
